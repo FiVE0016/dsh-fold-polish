@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.10.1 — 2026-10-13
+
+- **修（严重）：「每轮显示耗时」整条数据链是断的，徽标永远不显示。** 三个 bug 叠加：① `scripts/build.mjs` 的 MODULES 注册表是**手写四行**，0.10.0 加 turn-timer.js 模块时只更新了模块清单、忘了同步注册表——模块打进了 client.js 却查无此键，`local['./src/turn-timer.js']` 为 undefined，store 创建不了（`--check` 比对不出来：产物与构建脚本是同步的，bug 在模板里）。注册表改为按 LOCAL_MODULES 自动生成，加模块只改一处。② `pickSessionId` 猜的三种 sessions 形状（`sessions.current` / `sessions.byId` / `sessions.list()`）在真实宿主里全不存在，改用宿主实证路径：DOM `[data-conversation-session]`（宿主自己的输入代码就这么拿当前会话）+ `sessions.list.getSnapshot().byId`。③ DOM 侧诊断对象写在 client-entry 传入的环境对象上，控制台读真 window 永远 null。诊断入口：控制台 `__DSH_BUBBLE_FOLD__.turnTimer()`（probe / dom / store 三段）。
+- **修：每轮小字重复几十次。** 宿主把 `data-chat-turn` 挂在**每条消息容器**上（与折叠锚点同一批属性），一轮有几十个带同一 turn 号的元素——原来每个都插一个小字（实测 315 个容器插 315 次）。改为按 turn 分组、只在该轮 DOM 末尾容器插一个。原实现因注册 bug 从未真正跑起来过，此问题也一直没暴露。
+- **去快捷键（用户要求）**：移除全部全局快捷键（原 `Ctrl+Shift+B` 总开关 / `Ctrl+Shift+,` 开面板 / `Ctrl+Shift+↑↓` 输入框高度 / `Ctrl+F` 查找）。所有开关走宿主「设置 → 插件 → UI 美化」tab；「查找」从右栏 tab 列表打开。面板内仅保留 `Esc` 关闭（弹窗关闭的标准模式）。
+
 ## 0.10.0 — 2026-10-12
 
 - **新功能：每轮显示耗时。** 每轮对话末尾出现一行小字「本轮用时 12.3秒」——从宿主开始处理这条命令（该轮首个 step 的 `stepStartTime`）到最后一步输出完成（末步 `completedTime`），中间的工具执行间隔也计入。数据取自聊天快照的 settled 节点（`uiConversation` binding，只读），经一个不可见的 `shell.overlay` 探针（用宿主注入的 `useSessions` 解析当前会话）写进纯数据 store，DOM 层只消费 store——整条链路仍是 display-only，符合本插件"不写会话日志/模型/代理"的设计底线。设置项「每轮显示耗时」默认开，页内面板与设置页两处同步；老宿主没有 `uiConversation` 时自动降级（徽标缺席 + 控制台 warn），`dispose` 时探针、订阅与徽标全部清干净。数据接法对照 gbeta/dsh-token-speed 的实测写法（MIT）。新增纯逻辑测试 `test/turn-timer.test.mjs`（11 条：格式化 / 多步轮次全跨度 / 乱序步 / 无效 timing 跳过 / store 通知与容错 / 设置归一化）。

@@ -2571,36 +2571,13 @@ export function start(win, React) {
     }
   }
 
+  // 面板内交互只剩 Esc 关闭（弹窗关闭的标准模式）。
+  // 2026-10-13：**全部全局快捷键已移除**（原 Ctrl+Shift+B 总开关 / Ctrl+Shift+,
+  // 开面板 / Ctrl+Shift+↑↓ 调输入框高度）——用户要求一切设置走设置界面
+  // （宿主「设置 → 插件 → UI 美化」tab），不再注册任何组合键。
   function onKeydown(event) {
     if (event.key === 'Escape' && panelOpen) {
       closePanel()
-      return
-    }
-    if (!event.ctrlKey || !event.shiftKey || event.altKey) return
-    const active = doc.activeElement
-    if (active instanceof win.HTMLElement && (
-      active.tagName === 'INPUT' ||
-      active.tagName === 'TEXTAREA' ||
-      active.isContentEditable
-    )) return
-    const key = String(event.key || '').toLowerCase()
-    if (key === 'b') {
-      settings = F.normalizeSettings({ ...settings, enabled: !settings.enabled })
-      persist()
-      measured.clear()
-      scan()
-      syncPanel()
-      event.preventDefault()
-    } else if ((key === ',' || key === '/') && settings.enabled) {
-      // The only way into settings: no floating button, no persistent pill.
-      togglePanel()
-      event.preventDefault()
-    } else if (key === 'arrowup' && settings.enabled) {
-      setComposerHeight(composerHeight + F.HEIGHT_STEP)
-      event.preventDefault()
-    } else if (key === 'arrowdown' && settings.enabled) {
-      setComposerHeight(composerHeight - F.HEIGHT_STEP)
-      event.preventDefault()
     }
   }
 

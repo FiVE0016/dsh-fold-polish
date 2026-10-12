@@ -293,24 +293,23 @@ test('the tab api writes through to the running controller', () => {
   assert.equal(typeof off, 'function', 'subscribe hands back an unsubscribe')
 })
 
-test('Ctrl+F opens the find tab in the desktop app, and is left alone in a browser', () => {
-  const desktop = runEntry({ userAgent: 'Mozilla/5.0 (Windows NT 10.0) Chrome/152 Electron/44.0.0 Safari/537.36' })
-  const desktopCtx = makeCtx()
-  desktop.plugin.apply(desktopCtx.ctx)
-  const handler = (desktop.listeners.keydown ?? [])[0]
-  assert.ok(handler, 'the desktop key route was installed')
-  const event = { key: 'f', ctrlKey: true, shiftKey: false, altKey: false, prevented: false, preventDefault() { this.prevented = true } }
-  handler(event)
-  assert.equal(event.prevented, true, 'the platform find is not left to do nothing')
-  assert.deepEqual(desktopCtx.opened, [FIND_TAB_ID], 'the find tab is opened')
-
-  const browser = runEntry({ userAgent: 'Mozilla/5.0 (Windows NT 10.0) Chrome/152.0 Safari/537.36' })
-  const browserCtx = makeCtx()
-  browser.plugin.apply(browserCtx.ctx)
-  assert.equal((browser.listeners.keydown ?? []).length, 0, 'a real browser keeps its own Ctrl+F')
+test('the plugin registers no global keyboard shortcuts at all (2026-10-13: all removed)', () => {
+  // 用户要求一切设置走设置界面：插件不注册任何 window/document 级 keydown
+  // 监听（原 Ctrl+Shift+B 总开关 / Ctrl+Shift+, 开面板 / Ctrl+Shift+↑↓ 调
+  // 高度 / Ctrl+F 查找全部移除）——与浏览器、输入法、其它软件热键零冲突。
+  for (const userAgent of [
+    'Mozilla/5.0 (Windows NT 10.0) Chrome/152 Electron/44.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0) Chrome/152.0 Safari/537.36'
+  ]) {
+    const entry = runEntry({ userAgent })
+    const ctx = makeCtx()
+    entry.plugin.apply(ctx.ctx)
+    const where = userAgent.includes('Electron') ? 'desktop' : 'browser'
+    assert.equal((entry.listeners.keydown ?? []).length, 0, `no keydown listener is installed (${where})`)
+  }
 })
 
-test('without the right-bar service the layout is never touched', () => {
+test('without the right-bar service the find tab is simply not registered', () => {
   const desktop = runEntry({ userAgent: 'Mozilla/5.0 Chrome/152 Electron/44.0.0 Safari/537.36' })
   const layoutCalls = []
   const registrations = new Map()
@@ -325,10 +324,8 @@ test('without the right-bar service the layout is never touched', () => {
   }
   desktop.plugin.apply(ctx)
   assert.equal(registrations.has('sidebar.right.pane.tab'), false, 'nothing was registered')
-  const handler = (desktop.listeners.keydown ?? [])[0]
-  const event = { key: 'f', ctrlKey: true, shiftKey: false, altKey: false, preventDefault() {} }
-  handler(event)
-  assert.deepEqual(layoutCalls, [], 'Ctrl+F must not open an empty right column')
+  assert.equal((desktop.listeners.keydown ?? []).length, 0, 'no keyboard route to compensate')
+  assert.deepEqual(layoutCalls, [], 'the right column is never opened')
 })
 
 test('the settings page covers every setting the in-page panel has', async () => {

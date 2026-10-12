@@ -644,28 +644,17 @@ console.log('interaction')
     assert.equal(win.document.body.querySelector('[data-lf-count]'), null, 'no "无折叠" pill')
     assert.equal(win.document.body.querySelector('[data-lf-group]'), null, 'no bulk buttons')
   })
-  test('settings open from the keyboard, not from a standing button', () => {
-    fire(win, 'document', 'keydown', { ctrlKey: true, shiftKey: true, altKey: false, key: ',', preventDefault() {} })
-    const panel = win.document.body.querySelector('[data-lf-panel]')
-    const scrim = win.document.body.querySelector('[data-lf-scrim]')
-    assert.ok(panel && panel.hidden === false, 'panel is open')
-    assert.ok(scrim, 'has a scrim')
-    fire(win, 'document', 'click', { target: scrim })
-    assert.equal(panel.hidden, true, 'clicking outside closes it')
-  })
-  test('Ctrl+Shift+B toggles the whole plugin', () => {
-    let prevented = false
-    fire(win, 'document', 'keydown', { ctrlKey: true, shiftKey: true, altKey: false, key: 'B', preventDefault() { prevented = true } })
-    assert.equal(prevented, true)
-    assert.equal(controller.settings().enabled, false)
-    assert.equal(mine.bubble.hasAttribute('data-lf-clamped'), false)
-  })
-  test('hotkeys are ignored while typing in an input', () => {
-    const input = new FakeElement('input')
-    win.document.activeElement = input
-    fire(win, 'document', 'keydown', { ctrlKey: true, shiftKey: true, altKey: false, key: 'b', preventDefault() {} })
-    assert.equal(controller.settings().enabled, false)
-    win.document.activeElement = null
+  test('no global keyboard gesture changes the plugin (2026-10-13: all shortcuts removed)', () => {
+    // 全部全局快捷键已移除（原 Ctrl+Shift+, 开面板 / Ctrl+Shift+B 总开关 /
+    // Ctrl+Shift+↑↓ 调高度）：任何组合键都不再打开面板、切换开关或改变
+    // 任何设置——一切走宿主「设置 → 插件 → UI 美化」tab。
+    for (const key of [',', 'B', 'b', 'ArrowUp', 'ArrowDown', 'f']) {
+      let prevented = false
+      fire(win, 'document', 'keydown', { ctrlKey: true, shiftKey: true, altKey: false, key, preventDefault() { prevented = true } })
+      assert.equal(prevented, false, `Ctrl+Shift+${key} is not consumed`)
+    }
+    assert.equal(controller.settings().enabled, true, 'the plugin stays on')
+    assert.equal(win.document.body.querySelector('[data-lf-panel]'), null, 'the panel never opens from the keyboard')
   })
 }
 

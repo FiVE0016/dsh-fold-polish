@@ -571,48 +571,9 @@ window.__ModuleLoader__.load({
           retryFindTab()
         }
 
-        // Ctrl+F opens the find tab — but only where the platform has no find of
-        // its own. The desktop app has none (verified: no findInPage), while a
-        // real browser's Ctrl+F already reaches folded content thanks to the
-        // until-found work; hijacking it there would be a downgrade.
-        const desktopApp = /Electron\//.test(view.navigator?.userAgent ?? '')
-        if (desktopApp) {
-          const onFindKey = (event) => {
-            if (event.key !== 'f' || !event.ctrlKey || event.shiftKey || event.altKey) return
-            event.preventDefault()
-            if (!findTabRegistered) {
-              console.warn('[fold-polish] 查找面板未注册，Ctrl+F 不做任何事（不会打开空面板）')
-              return
-            }
-            let right = null
-            try {
-              right = ctx?.get?.('sidebarRight') ?? null
-            } catch {
-              right = null
-            }
-            let opened = false
-            if (right && typeof right.openTab === 'function') {
-              try {
-                right.openTab(FIND_TAB_ID)
-                opened = true
-              } catch {
-                // A root-scoped face may refuse: the column is opened instead.
-              }
-            }
-            if (!opened) {
-              const layout = ctx?.get?.('layout')
-              try { layout?.openRightbar?.(true, false) } catch { /* column cannot fit */ }
-            }
-            // The panel mounts on first open and asks for focus itself.
-            view.setTimeout(() => focusFindInput?.(), 80)
-          }
-          view.addEventListener('keydown', onFindKey, true)
-          const prevDispose = dispose
-          dispose = () => {
-            view.removeEventListener('keydown', onFindKey, true)
-            prevDispose()
-          }
-        }
+        // 「查找」tab 的打开入口只有右侧栏 tab 列表本身——2026-10-13 起
+        // 不再接管 Ctrl+F（用户要求一切入口走界面，不注册全局快捷键）。
+        // tab 注册与面板挂载逻辑不变，照常从右栏 tab 列表打开。
 
         // 每轮耗时探针：纯 ctx 驱动，不依赖宿主往组件里注入什么 props。
         // 数据源是 uiConversation 的 chat binding（只读）：binding(sessionId)

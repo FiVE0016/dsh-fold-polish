@@ -47,7 +47,7 @@ dsh-fold-polish: failed
 | **分组模式**（工作详情 compact / standard，以及 detailed 的已结束轮） | 步骤被包在 `[data-step-process]` 容器里，容器自带标题开关。折叠缝点击宿主自己的开关（以及各轮的 `[data-turn-process]` 摘要行），状态完全归宿主，连它自己的标题箭头都同步 |
 | **内联模式**（工作详情 verbose，宿主不提供开关） | 宿主的摘要行是 `disabled`、步骤全部展开。此时折叠缝自己把这串行折起来：在这些行上打私有属性 `data-lf-step-folded` **并设 `hidden="until-found"`**（纯显示层，插件一关或卸载，行立刻全部回来）。用 until-found 而不是 `display: none` 是为了让浏览器搜索够得着：命中时会触发 `beforematch`，插件据此把整段打开 |
 
-搜索（Ctrl+F）的两条路径：
+搜索的两条路径：
 
 - **折叠的消息正文**：限高盒是 `overflow-y: auto`（滚动条隐藏）。浏览器揭示搜索结果的方式就是滚动它所在的滚动容器，所以插件在正文的 `scroll` 事件里直接把这条消息展开——`scrollTop > 0` 只可能来自"有人想读被折掉的部分"。
 - **折叠的步骤**：`hidden="until-found"` / 宿主自己的 `content-visibility: hidden` 都会被浏览器搜索命中（`display: none` 不会）。`beforematch` 处理器按块边界找到那一行所属的整段，走宿主开关或清掉插件自己的标记，并把它记入"读者手动操作过"集合，避免自动折叠立刻把它折回去。
@@ -68,7 +68,7 @@ dsh-fold-polish: failed
 | 面板体 | `slots.register({ name: 'sidebar.right.pane.tab', key: id, inject: () => ({ api }) }, Panel)` | 按 id 分派的 tab 内容 |
 | 标题 chip | `slots.register({ name: 'sidebar.right.pane.tab.title', key: id }, Title)` | tab 条上的文字 |
 
-打开方式：`ctx.get('sidebarRight').openTab(id)`（服务是 session 作用域，根作用域下可能拒绝，失败则退回 `ctx.get('layout').openRightbar(true, false)`）。`Ctrl + F` 只在 UA 含 `Electron/` 时接管——真浏览器有自己的查找栏，而折叠内容通过 until-found 已经对它可见。搜索与揭示逻辑在 DOM 层（`controller.search` / `controller.revealAt`），面板只是它的 React 外壳。
+打开方式：用户在右栏 tab 列表里点开（2026-10-13 起不再有 `Ctrl + F` 键盘入口——插件不注册任何全局快捷键）。真浏览器里折叠内容通过 until-found 对原生查找可见。搜索与揭示逻辑在 DOM 层（`controller.search` / `controller.revealAt`），面板只是它的 React 外壳。
 
 ## 右侧栏宽度（怎么设、怎么读、为什么这么绕）
 
