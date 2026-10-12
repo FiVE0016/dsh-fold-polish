@@ -45,11 +45,16 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 5))
 const runEntry = (options = {}) => {
   let registration = null
   const listeners = {}
+  let currentSettings = { enabled: true, userLines: 6, assistantLines: 10, extraPx: 8, rightbarRatio: 45 }
   const fakeController = {
     applied: [],
     disposed: false,
-    settings: () => ({ enabled: true, userLines: 6, assistantLines: 10, extraPx: 8, rightbarRatio: 45 }),
-    update(patch) { this.applied.push(patch) },
+    settings: () => ({ ...currentSettings }),
+    update(patch) {
+      this.applied.push(patch)
+      currentSettings = { ...currentSettings, ...patch }
+      this.listener?.()
+    },
     subscribe(fn) { this.listener = fn; return () => { this.listener = null } },
     rescan() {},
     stats: () => ({}),
@@ -82,9 +87,23 @@ const runEntry = (options = {}) => {
     setTimeout: (fn) => { if (typeof fn === 'function') Promise.resolve().then(fn); return 0 },
     clearTimeout: () => {},
     MutationObserver: class {
-      constructor(callback) { this.callback = callback }
-      observe() { observers.push(this.callback) }
-      disconnect() {}
+      constructor(callback) {
+        this.callback = callback
+        this.targets = new Map()
+        this.pending = []
+        this.disconnects = 0
+        observers.push(this)
+      }
+      observe(target, options) {
+        assert.ok(target, 'MutationObserver requires an existing target')
+        this.targets.set(target, { ...options })
+      }
+      disconnect() {
+        this.targets.clear()
+        this.pending.length = 0
+        this.disconnects += 1
+      }
+      takeRecords() { return this.pending.splice(0) }
     },
     HTMLElement: class {},
     Element: class {},
@@ -98,39 +117,105 @@ const runEntry = (options = {}) => {
   const fn = new Function('window', 'document', 'console', source)
   fn(win, fakeDocument, { warn() {}, error() {}, log() {} })
   const plugin = registration.factory((name) => (name === 'react' ? fakeReact : null))
-  return { plugin, win, fakeController, listeners, observers }
+  // Queue records against the subscriptions in force WHEN the mutation happens.
+  // Flush separately so replacement + new-frame style changes can be coalesced.
+  const queueMutations = (records) => {
+    for (const observer of observers) {
+      for (const record of records) {
+        const matches = [...observer.targets].some(([target, config]) => {
+          const inScope = target === record.target || (config.subtree && target.contains?.(record.target))
+          if (!inScope) return false
+          if (record.type === 'childList') return config.childList === true
+          return record.type === 'attributes' && config.attributes === true &&
+            (!config.attributeFilter || config.attributeFilter.includes(record.attributeName))
+        })
+        if (matches) observer.pending.push(record)
+      }
+    }
+  }
+  const flushMutations = () => {
+    // Snapshot first: one callback rebinding another observer must not lose the
+    // batch already delivered to that observer at this checkpoint.
+    const deliveries = observers.map((observer) => [observer, observer.takeRecords()])
+    for (const [observer, records] of deliveries) {
+      if (records.length) observer.callback(records, observer)
+    }
+  }
+  const emitMutations = (...records) => { queueMutations(records); flushMutations() }
+  return { plugin, win, fakeController, listeners, observers, queueMutations, flushMutations, emitMutations }
 }
 
-/** A document with a frame carrying the host's inline grid, for width tests. */
-const makeFrameDocument = (tracks = '280px minmax(400px, 1fr) minmax(0px, 720px)') => {
+const FRAME_TRACKS = '280px minmax(400px, 1fr) minmax(0px, 720px)'
+const CLOSED_TRACKS = '280px minmax(400px, 1fr) minmax(0px, 0px)'
+const attrMutation = (target, attributeName = 'style') => ({ type: 'attributes', target, attributeName })
+
+/** A replaceable frame with write counters, not a layout/CSS engine. */
+const makeFrameDocument = (tracks = FRAME_TRACKS, { mounted = true } = {}) => {
   const created = []
-  const frame = {
-    style: { gridTemplateColumns: tracks },
-    attrs: {},
-    hasAttribute(name) { return Object.prototype.hasOwnProperty.call(this.attrs, name) },
-    setAttribute(name, value) { this.attrs[name] = value },
-    removeAttribute(name) { delete this.attrs[name] }
+  const root = {
+    contains(node) { return node === this || node?.isConnected === true },
+    querySelectorAll(selector) { return document.querySelectorAll(selector) }
   }
-  const head = { children: [], appendChild(child) { this.children.push(child) } }
+  const makeFrame = (value = FRAME_TRACKS) => ({
+    style: { gridTemplateColumns: value },
+    attrs: {},
+    isConnected: false,
+    attributeWrites: 0,
+    hasAttribute(name) { return Object.prototype.hasOwnProperty.call(this.attrs, name) },
+    getAttribute(name) { return this.attrs[name] ?? null },
+    setAttribute(name, value) { this.attributeWrites += 1; this.attrs[name] = String(value) },
+    removeAttribute(name) { this.attributeWrites += 1; delete this.attrs[name] }
+  })
+  const frame = makeFrame(tracks)
+  let currentFrame = mounted ? frame : null
+  frame.isConnected = mounted
+  const head = {
+    children: [],
+    appendChild(child) { this.children.push(child); child.isConnected = true }
+  }
+  const document = {
+    defaultView: null,
+    head,
+    body: root,
+    documentElement: root,
+    createElement: () => {
+      let text = ''
+      const el = {
+        id: '',
+        textWrites: 0,
+        get textContent() { return text },
+        set textContent(value) { this.textWrites += 1; text = String(value) },
+        setAttribute(name, value) { if (name === 'id') this.id = value },
+        remove() { this.isConnected = false; head.children = head.children.filter((child) => child !== this) }
+      }
+      created.push(el)
+      return el
+    },
+    getElementById: (id) => created.find((el) => el.id === id && el.isConnected) ?? null,
+    querySelector: (selector) => document.querySelectorAll(selector)[0] ?? null,
+    querySelectorAll: (selector) => {
+      if (!currentFrame) return []
+      if (String(selector).includes('div[style]')) return [currentFrame]
+      if (String(selector).includes('data-lf-frame') && currentFrame.hasAttribute('data-lf-frame')) return [currentFrame]
+      return []
+    }
+  }
   return {
-    frame,
-    created,
-    document: {
-      defaultView: null,
-      head,
-      body: null,
-      documentElement: null,
-      createElement: () => {
-        const el = { id: '', textContent: '', setAttribute(name, value) { if (name === 'id') this.id = value } }
-        created.push(el)
-        return el
-      },
-      getElementById: (id) => created.find((el) => el.id === id) ?? null,
-      querySelector: () => null,
-      querySelectorAll: (selector) => (String(selector).includes('div[style]') ? [frame] : [])
+    frame, created, document, makeFrame,
+    replaceFrame(next) {
+      const previous = currentFrame
+      if (previous) previous.isConnected = false
+      currentFrame = next
+      if (next) next.isConnected = true
+      return { type: 'childList', target: root, addedNodes: next ? [next] : [], removedNodes: previous ? [previous] : [] }
     }
   }
 }
+
+const rightbarContext = () => ({
+  slots: { inject: (_name, callback) => { callback(); return () => {} }, register: () => () => {} },
+  get: (name) => (name === 'layout' ? { panels: { setRightbar: () => {}, setViewportWidth: () => {} } } : undefined)
+})
 
 /** A ctx with the slot ledger plus the right-bar services the entry asks for. */
 const makeCtx = () => {
@@ -200,9 +285,10 @@ test('the tab api writes through to the running controller', () => {
   const { ctx, registrations } = makeCtx()
   plugin.apply(ctx)
   const props = registrations.get('settings.plugins.tab').options.inject()
+  assert.equal(props.api.settings().userLines, 6, 'reads come from the controller')
   props.api.update({ userLines: 9 })
   assert.deepEqual(fakeController.applied.at(-1), { userLines: 9 })
-  assert.equal(props.api.settings().userLines, 6, 'reads come from the controller')
+  assert.equal(props.api.settings().userLines, 9, 'the write landed in the controller state, reads still go through it')
   const off = props.api.subscribe(() => {})
   assert.equal(typeof off, 'function', 'subscribe hands back an unsubscribe')
 })
@@ -402,7 +488,7 @@ test('the chosen width is forced with a stylesheet rule, not left to the host', 
 
 test('a drag is adopted, and our own apply is not mistaken for one', async () => {
   const { document, frame } = makeFrameDocument()
-  const { plugin, win, observers, fakeController } = runEntry({ userAgent: 'Mozilla/5.0 Chrome/152 Electron/44.0.0 Safari/537.36', document })
+  const { plugin, win, observers, emitMutations, fakeController } = runEntry({ userAgent: 'Mozilla/5.0 Chrome/152 Electron/44.0.0 Safari/537.36', document })
   const applied = []
   const ctx = {
     slots: { inject: (_name, callback) => { callback(); return () => {} }, register: () => () => {} },
@@ -414,13 +500,13 @@ test('a drag is adopted, and our own apply is not mistaken for one', async () =>
 
   // Right after our own apply the host re-renders: that must NOT become the ratio.
   frame.style.gridTemplateColumns = '280px minmax(400px, 1fr) minmax(0px, 300px)'
-  observers[0]()
+  emitMutations(attrMutation(frame))
   assert.equal(fakeController.applied.length, 0, '自己的应用不算拖动')
 
   // A real drag, later: the host number changes and we adopt it.
   await new Promise((resolve) => setTimeout(resolve, 850))
   frame.style.gridTemplateColumns = '280px minmax(400px, 1fr) minmax(0px, 960px)'
-  observers[0]()
+  emitMutations(attrMutation(frame))
   assert.deepEqual(fakeController.applied.at(-1), { rightbarRatio: 60 }, '拖动写回设置（960 / 1600）')
   assert.equal(win.__DSH_BUBBLE_FOLD__.rightbar().ratio, 60, '读回也是 60%')
 })
@@ -445,7 +531,7 @@ test('closing the right panel releases the forced width, reopening restores it',
   // conversation stays stuck at half width with no sidebar to explain it. Closing,
   // going fullscreen, or a zero-width column must always drop the rule.
   const { document, frame, created } = makeFrameDocument()
-  const { plugin, observers } = runEntry({ userAgent: 'Mozilla/5.0 Chrome/152 Electron/44.0.0 Safari/537.36', document })
+  const { plugin, emitMutations } = runEntry({ userAgent: 'Mozilla/5.0 Chrome/152 Electron/44.0.0 Safari/537.36', document })
   const ctx = {
     slots: { inject: (_name, callback) => { callback(); return () => {} }, register: () => () => {} },
     get: (name) => (name === 'layout' ? { panels: { setRightbar: () => {}, setViewportWidth: () => {} } } : undefined)
@@ -459,14 +545,14 @@ test('closing the right panel releases the forced width, reopening restores it',
   // Closing: the host zeroes the third column and marks the frame collapsed.
   frame.attrs['data-rightbar-collapsed'] = '1'
   frame.style.gridTemplateColumns = '280px minmax(400px, 1fr) minmax(0px, 0px)'
-  observers[0]()
+  emitMutations(attrMutation(frame), attrMutation(frame, 'data-rightbar-collapsed'))
   assert.equal(rule.textContent, '', '关闭后必须撤掉强制宽度，否则主区域被占住')
   assert.equal(frame.attrs['data-lf-frame'], undefined, '框架标记也撤掉')
 
   // Reopening: the reader's own width comes back.
   delete frame.attrs['data-rightbar-collapsed']
   frame.style.gridTemplateColumns = '280px minmax(400px, 1fr) minmax(0px, 720px)'
-  observers[0]()
+  emitMutations(attrMutation(frame), attrMutation(frame, 'data-rightbar-collapsed'))
   assert.match(rule.textContent, /720px/, '重新打开时恢复')
   assert.equal(frame.attrs['data-lf-frame'], '1')
 })
