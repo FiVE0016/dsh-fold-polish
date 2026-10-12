@@ -1232,7 +1232,11 @@ export function start(win, React) {
    */
   function syncTurnTimers() {
     const durations = turnTimers?.get?.() ?? {}
-    const diag = win.__DSH_BUBBLE_FOLD_TURN_TIMER_DOM__ ?? (win.__DSH_BUBBLE_FOLD_TURN_TIMER_DOM__ = {})
+    // diag 必须写**真 window**：client-entry 的 turnTimer() 句柄读的是
+    // view.__DSH_BUBBLE_FOLD_TURN_TIMER_DOM__（真 window），而本函数的 win 是
+    // client-entry 传进来的环境对象——写在它上面控制台永远读不到（恒 null）。
+    const realWin = doc.defaultView ?? win
+    const diag = realWin.__DSH_BUBBLE_FOLD_TURN_TIMER_DOM__ ?? (realWin.__DSH_BUBBLE_FOLD_TURN_TIMER_DOM__ = {})
     diag.containers = 0
     diag.withKey = 0
     diag.withDuration = 0

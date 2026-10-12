@@ -70,10 +70,11 @@ const bundle = `${header}(function () {
   const MODULES = {}
 
 ${sources.join('\n')}
-  MODULES['./src/fold.js'] = fold
-  MODULES['./src/browser.js'] = browser
-  MODULES['./src/settings-panel.js'] = settingsPanel
-  MODULES['./src/find-panel.js'] = findPanel
+  // 注册表从 LOCAL_MODULES 自动生成——曾经是手写四行，加 turn-timer.js 时
+  // 只更新了上面的模块清单、忘了同步这里，模块打进了包却查无此键，
+  // 「每轮显示耗时」整条数据链从第一步就断掉（local[...] 为 undefined）。
+  // 以后加模块只改 LOCAL_MODULES 一处即可。
+${LOCAL_MODULES.map(([spec, name]) => `  MODULES['${spec}'] = ${name}`).join('\n')}
 
   // Convenience handle for verifying or driving the plugin from the console:
   //   __DSH_BUBBLE_FOLD__.settings() / .update({...}) / .rescan()

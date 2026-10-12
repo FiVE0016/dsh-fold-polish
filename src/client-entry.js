@@ -645,27 +645,44 @@ window.__ModuleLoader__.load({
             polls: 0
           }
           window.__DSH_BUBBLE_FOLD_TURN_TIMER_DIAG__ = turnTimerDiag
-          // 当前会话 id：sessions 服务的多个可能形状都试一遍，全部拿不到就
-          // 退到"最近一个可用会话"，再不行就静默（徽标缺席，其余功能不受影响）。
+          // 当前会话 id，两条宿主实证路径（按优先级）：
+          // ① DOM：宿主主对话容器带 `data-conversation-session` 属性——宿主
+          //    自己的输入代码（dsh-client-ui-chat）就是从 DOM occurrence 上读
+          //    `dataset.conversationSession` 拿当前会话的。从插件自己的折叠锚点
+          //    `[data-chat-flow-kind]` 往上 closest，保证拿到的是"正在展示的会话"。
+          // ② 服务：`sessions.list.getSnapshot()` 返回 { byId, ... }（宿主
+          //    openFile 处实证：`sessions.list.getSnapshot().byId[sessionId]`）。
+          //    曾经猜的 `sessions.current` / `sessions.byId` / `sessions.list()`
+          //    三种形状在真实宿主里全不存在，拿不到 id 就静默降级（无徽标）。
           const pickSessionId = () => {
+            try {
+              const flowItem = view.document?.querySelector?.('[data-chat-flow-kind]')
+              const domId = flowItem?.closest?.('[data-conversation-session]')?.dataset?.conversationSession
+              if (typeof domId === 'string' && domId) {
+                turnTimerDiag.services.sessionSource = 'dom'
+                return domId
+              }
+            } catch { /* DOM 路径失败就退到服务路径 */ }
             let sessions = null
             try { sessions = ctx?.get?.('sessions') ?? null } catch { sessions = null }
             if (!sessions) { turnTimerDiag.services.sessions = 'missing'; return null }
             turnTimerDiag.services.sessions = typeof sessions
             turnTimerDiag.services.sessionsKeys = (() => { try { return Object.keys(sessions).slice(0, 20) } catch { return null } })()
-            const current = sessions.current ?? sessions.currentId ?? null
-            if (typeof current === 'string' && current) return current
-            const byId = sessions.byId
+            const snap = (() => { try { return sessions.list?.getSnapshot?.() ?? null } catch { return null } })()
+            turnTimerDiag.services.snapshotKeys = snap && typeof snap === 'object' ? Object.keys(snap).slice(0, 20) : 'null'
+            const current = snap?.currentId ?? snap?.current ?? null
+            if (typeof current === 'string' && current) {
+              turnTimerDiag.services.sessionSource = 'list-current'
+              return current
+            }
+            const byId = snap?.byId
             if (byId && typeof byId === 'object') {
               const ids = Object.keys(byId)
-              if (ids.length > 0) return ids[ids.length - 1]
+              if (ids.length > 0) {
+                turnTimerDiag.services.sessionSource = 'byId-last'
+                return ids[ids.length - 1]
+              }
             }
-            const list = typeof sessions.list === 'function' ? sessions.list() : null
-            if (Array.isArray(list) && list.length > 0) {
-              const last = list[list.length - 1]
-              return typeof last === 'string' ? last : (last?.id ?? null)
-            }
-            turnTimerDiag.services.sessionsList = list === null ? 'not-array' : list.length
             return null
           }
           let lastSignature = ''
