@@ -1410,32 +1410,30 @@
         const realWin = doc.defaultView ?? win
         const diag = realWin.__DSH_BUBBLE_FOLD_TURN_TIMER_DOM__ ?? (realWin.__DSH_BUBBLE_FOLD_TURN_TIMER_DOM__ = {})
         diag.containers = 0
-        diag.withKey = 0
-        diag.withDuration = 0
+        diag.turns = 0
         diag.chips = 0
         diag.durations = durations
         diag.setting = settings.turnTimer
+        // 宿主把 data-chat-turn 挂在**每条消息容器**上（与 data-chat-flow-kind
+        // 同一批属性，见 dsh-client-ui-chat），所以一轮有几十个带同一 turn 号
+        // 的元素——不挑末尾就会每轮重复几十次小字。按 turn 分组、只取每轮在
+        // DOM 里的最后一个容器（后出现的覆盖先出现的）。
+        const lastOfTurn = new Map()
         for (const container of doc.querySelectorAll('[data-chat-turn]')) {
           diag.containers += 1
           const key = turnIdOf(container)
-          if (key !== null) diag.withKey += 1
-          const ms = key === null ? undefined : durations[key]
-          if (typeof ms === 'number') diag.withDuration += 1
-          let chip = null
-          for (const child of container.children) {
-            if (child.hasAttribute?.('data-lf-turn-timer')) { chip = child; break }
-          }
-          if (!settings.turnTimer || typeof ms !== 'number' || !Number.isFinite(ms)) {
-            chip?.remove()
-            continue
-          }
-          if (!chip) {
-            chip = doc.createElement('div')
-            chip.setAttribute('data-lf-turn-timer', '1')
-            container.appendChild(chip)
-          }
-          const label = `本轮用时 ${TT ? TT.formatDuration(ms) : ''}`
-          if (chip.textContent !== label) chip.textContent = label
+          if (key !== null) lastOfTurn.set(key, container)
+        }
+        diag.turns = lastOfTurn.size
+        // 末尾容器会随流式追加而移动，旧位置的小字先统一撤掉再重建。
+        for (const chip of doc.querySelectorAll('[data-lf-turn-timer]')) chip.remove()
+        for (const [key, container] of lastOfTurn) {
+          const ms = durations[key]
+          if (!settings.turnTimer || typeof ms !== 'number' || !Number.isFinite(ms)) continue
+          const chip = doc.createElement('div')
+          chip.setAttribute('data-lf-turn-timer', '1')
+          chip.textContent = `本轮用时 ${TT ? TT.formatDuration(ms) : ''}`
+          container.appendChild(chip)
           diag.chips += 1
         }
       }
