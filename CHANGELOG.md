@@ -1,5 +1,9 @@
 # 更新记录
 
+## 0.10.0 — 2026-10-12
+
+- **新功能：每轮显示耗时。** 每轮对话末尾出现一行小字「本轮用时 12.3秒」——从宿主开始处理这条命令（该轮首个 step 的 `stepStartTime`）到最后一步输出完成（末步 `completedTime`），中间的工具执行间隔也计入。数据取自聊天快照的 settled 节点（`uiConversation` binding，只读），经一个不可见的 `shell.overlay` 探针（用宿主注入的 `useSessions` 解析当前会话）写进纯数据 store，DOM 层只消费 store——整条链路仍是 display-only，符合本插件"不写会话日志/模型/代理"的设计底线。设置项「每轮显示耗时」默认开，页内面板与设置页两处同步；老宿主没有 `uiConversation` 时自动降级（徽标缺席 + 控制台 warn），`dispose` 时探针、订阅与徽标全部清干净。数据接法对照 gbeta/dsh-token-speed 的实测写法（MIT）。新增纯逻辑测试 `test/turn-timer.test.mjs`（11 条：格式化 / 多步轮次全跨度 / 乱序步 / 无效 timing 跳过 / store 通知与容错 / 设置归一化）。
+
 ## 0.9.6 — 2026-10-09
 
 - **改名**：`dsh-ui-beautify` → **`dsh-fold-polish`**（显示名仍是「UI 美化」）。上一个名字与社区里已有的一个 UI 插件撞词，搜索时会被压在后面；改成不撞词的名字，功能范围（折叠 / 输入框 / 右侧栏占比 / 查找）也仍在名字里。

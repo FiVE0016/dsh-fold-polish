@@ -169,6 +169,15 @@ const CSS = `
   box-sizing: border-box !important;
   margin: 2px 0 !important;
 }
+/* The per-turn duration chip: a muted, right-aligned line at a Turn's end. */
+:root[data-dsh-bubble-fold] [data-lf-turn-timer] {
+  margin: 0 8px 4px 0 !important;
+  text-align: right !important;
+  font-size: 11px !important;
+  line-height: 1.5 !important;
+  color: var(--dsw-alias-text-2, rgba(100, 116, 139, .85)) !important;
+  user-select: none !important;
+}
 /* The hairlines turn the line into the seam that separates steps from reply. */
 :root[data-dsh-bubble-fold] [data-lf-step-line]::before,
 :root[data-dsh-bubble-fold] [data-lf-step-line]::after {
@@ -647,6 +656,14 @@ export function start(win, React) {
 
   const F = win.__DSH_BUBBLE_FOLD_MODULES__?.fold
   if (!F) throw new Error('[dsh-fold-polish] fold module missing from bundle')
+  /** Pure helpers + the store the client-entry snapshot probe writes into. */
+  const TT = win.__DSH_BUBBLE_FOLD_MODULES__?.turnTimer ?? null
+  const turnTimers = win.turnTimers ?? null
+  /** Unsubscribe from the duration store, set once the probe has wired it. */
+  let turnTimerOff = null
+  if (turnTimers && typeof turnTimers.subscribe === 'function') {
+    turnTimerOff = turnTimers.subscribe(() => schedule())
+  }
 
   const computedStyleOf = win.getComputedStyle.bind(win)
 
@@ -1203,6 +1220,36 @@ export function start(win, React) {
     }
     for (const turnKey of [...unmergedByReader]) {
       if (!turns.has(turnKey)) unmergedByReader.delete(turnKey)
+    }
+  }
+
+  /**
+   * The per-turn duration chip: one muted line at each Turn container's END,
+   * labelled from the store the client-entry probe fills from the chat
+   * snapshot's timing data (first step's start → last step's completion).
+   * A Turn the store has no duration for — or the setting off — gets no chip;
+   * host re-renders that drop a chip are corrected on the next pass.
+   */
+  function syncTurnTimers() {
+    const durations = turnTimers?.get?.() ?? {}
+    for (const container of doc.querySelectorAll('[data-chat-turn]')) {
+      const key = turnIdOf(container)
+      const ms = key === null ? undefined : durations[key]
+      let chip = null
+      for (const child of container.children) {
+        if (child.hasAttribute?.('data-lf-turn-timer')) { chip = child; break }
+      }
+      if (!settings.turnTimer || typeof ms !== 'number' || !Number.isFinite(ms)) {
+        chip?.remove()
+        continue
+      }
+      if (!chip) {
+        chip = doc.createElement('div')
+        chip.setAttribute('data-lf-turn-timer', '1')
+        container.appendChild(chip)
+      }
+      const label = `本轮用时 ${TT ? TT.formatDuration(ms) : ''}`
+      if (chip.textContent !== label) chip.textContent = label
     }
   }
 
@@ -1818,6 +1865,7 @@ export function start(win, React) {
 
     if (!settings.enabled) {
       if (clamped.size > 0) clipAll()
+      for (const chip of doc.querySelectorAll('[data-lf-turn-timer]')) chip.remove()
       return
     }
 
@@ -1889,6 +1937,7 @@ export function start(win, React) {
         if (!seen.has(anchor) && !streaming.includes(anchor)) unwrap(anchor)
       }
       syncStepFolds()
+      syncTurnTimers()
       syncComposerGrip()
     }
   }
@@ -1976,6 +2025,7 @@ export function start(win, React) {
     row('步骤默认收起', checkbox('foldAllSteps'))
     row('默认只留一个按钮', checkbox('mergeByDefault'))
     row('按钮显示文字', checkbox('stepLabels'))
+    row('每轮显示耗时', checkbox('turnTimer'))
     row('输入框可拖动调高', checkbox('composerResize'))
 
     // 右侧栏宽度：百分比存进设置（重启后保持），像素由宿主 layout store 管。
@@ -2657,6 +2707,9 @@ export function start(win, React) {
       for (const [, handle] of composerHandles) handle.remove()
       composerHandles.clear()
       for (const seat of composerSeats()) seat.style.removeProperty('--dsh-composer-text-max-height')
+      turnTimerOff?.()
+      turnTimerOff = null
+      for (const chip of doc.querySelectorAll('[data-lf-turn-timer]')) chip.remove()
       clipAll()
       panel?.remove()
       scrim?.remove()

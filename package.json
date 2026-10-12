@@ -1,6 +1,6 @@
 {
   "name": "dsh-fold-polish",
-  "version": "0.9.6",
+  "version": "0.10.0",
   "description": "Display polish for the DeepSeek Harness conversation: fold overlong messages and work-step blocks, resize the composer and the right sidebar, and search folded content. Pure client-side and display-only.",
   "keywords": [
     "dsh",

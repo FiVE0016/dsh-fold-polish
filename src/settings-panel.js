@@ -95,6 +95,7 @@ export function createPanel(React, api) {
       toggle('foldAllSteps', '步骤默认收起', '每一段工作步骤默认折起，最新一轮也一样。'),
       toggle('mergeByDefault', '默认只留一个按钮', '每轮回复上方只显示「展开全部」；点开才摊开各条折叠缝，内容仍收起。'),
       toggle('stepLabels', '按钮显示文字', '开：三个按钮各带「展开全部 / 展开所有步骤 / 展开本步骤」文字；关：只留三个不同的箭头图标。'),
+      toggle('turnTimer', '每轮显示耗时', '在每轮对话末尾显示该轮从收到命令到完成输出的用时（取自宿主的步计时数据）。'),
       toggle('composerResize', '输入框可拖动调高', '在输入框卡片顶部显示一条拖拽手柄。'),
       h(Row, {
         label: '右侧栏占比 (%)',

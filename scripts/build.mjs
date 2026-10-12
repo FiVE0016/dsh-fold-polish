@@ -18,7 +18,8 @@ const LOCAL_MODULES = [
   ['./src/fold.js', 'fold'],
   ['./src/browser.js', 'browser'],
   ['./src/settings-panel.js', 'settingsPanel'],
-  ['./src/find-panel.js', 'findPanel']
+  ['./src/find-panel.js', 'findPanel'],
+  ['./src/turn-timer.js', 'turnTimer']
 ]
 
 const stripExports = (source) => source

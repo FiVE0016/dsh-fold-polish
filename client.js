@@ -79,6 +79,8 @@
       mergeByDefault: true,
       /** Put the text (展开步骤/收起步骤) on the seam bubble, not just the icon. */
       stepLabels: false,
+      /** Stamp each Turn's end with how long the round took (收到命令 → 输出完成). */
+      turnTimer: true,
       /** Preferred right-sidebar width, as a percent of the frame (30–70). */
       rightbarRatio: 45
     })
@@ -109,6 +111,7 @@
         composerResize: clampBool(raw.composerResize, DEFAULT_SETTINGS.composerResize),
         mergeByDefault: clampBool(raw.mergeByDefault, DEFAULT_SETTINGS.mergeByDefault),
         stepLabels: clampBool(raw.stepLabels, DEFAULT_SETTINGS.stepLabels),
+        turnTimer: clampBool(raw.turnTimer, DEFAULT_SETTINGS.turnTimer),
         rightbarRatio: clampInt(raw.rightbarRatio, LIMITS.minRightbarRatio, LIMITS.maxRightbarRatio, DEFAULT_SETTINGS.rightbarRatio)
       }
     }
@@ -337,6 +340,15 @@
       width: 100% !important;
       box-sizing: border-box !important;
       margin: 2px 0 !important;
+    }
+    /* The per-turn duration chip: a muted, right-aligned line at a Turn's end. */
+    :root[data-dsh-bubble-fold] [data-lf-turn-timer] {
+      margin: 0 8px 4px 0 !important;
+      text-align: right !important;
+      font-size: 11px !important;
+      line-height: 1.5 !important;
+      color: var(--dsw-alias-text-2, rgba(100, 116, 139, .85)) !important;
+      user-select: none !important;
     }
     /* The hairlines turn the line into the seam that separates steps from reply. */
     :root[data-dsh-bubble-fold] [data-lf-step-line]::before,
@@ -816,6 +828,14 @@
 
       const F = win.__DSH_BUBBLE_FOLD_MODULES__?.fold
       if (!F) throw new Error('[dsh-fold-polish] fold module missing from bundle')
+      /** Pure helpers + the store the client-entry snapshot probe writes into. */
+      const TT = win.__DSH_BUBBLE_FOLD_MODULES__?.turnTimer ?? null
+      const turnTimers = win.turnTimers ?? null
+      /** Unsubscribe from the duration store, set once the probe has wired it. */
+      let turnTimerOff = null
+      if (turnTimers && typeof turnTimers.subscribe === 'function') {
+        turnTimerOff = turnTimers.subscribe(() => schedule())
+      }
 
       const computedStyleOf = win.getComputedStyle.bind(win)
 
@@ -1372,6 +1392,36 @@
         }
         for (const turnKey of [...unmergedByReader]) {
           if (!turns.has(turnKey)) unmergedByReader.delete(turnKey)
+        }
+      }
+
+      /**
+       * The per-turn duration chip: one muted line at each Turn container's END,
+       * labelled from the store the client-entry probe fills from the chat
+       * snapshot's timing data (first step's start → last step's completion).
+       * A Turn the store has no duration for — or the setting off — gets no chip;
+       * host re-renders that drop a chip are corrected on the next pass.
+       */
+      function syncTurnTimers() {
+        const durations = turnTimers?.get?.() ?? {}
+        for (const container of doc.querySelectorAll('[data-chat-turn]')) {
+          const key = turnIdOf(container)
+          const ms = key === null ? undefined : durations[key]
+          let chip = null
+          for (const child of container.children) {
+            if (child.hasAttribute?.('data-lf-turn-timer')) { chip = child; break }
+          }
+          if (!settings.turnTimer || typeof ms !== 'number' || !Number.isFinite(ms)) {
+            chip?.remove()
+            continue
+          }
+          if (!chip) {
+            chip = doc.createElement('div')
+            chip.setAttribute('data-lf-turn-timer', '1')
+            container.appendChild(chip)
+          }
+          const label = `本轮用时 ${TT ? TT.formatDuration(ms) : ''}`
+          if (chip.textContent !== label) chip.textContent = label
         }
       }
 
@@ -1987,6 +2037,7 @@
 
         if (!settings.enabled) {
           if (clamped.size > 0) clipAll()
+          for (const chip of doc.querySelectorAll('[data-lf-turn-timer]')) chip.remove()
           return
         }
 
@@ -2058,6 +2109,7 @@
             if (!seen.has(anchor) && !streaming.includes(anchor)) unwrap(anchor)
           }
           syncStepFolds()
+          syncTurnTimers()
           syncComposerGrip()
         }
       }
@@ -2145,6 +2197,7 @@
         row('步骤默认收起', checkbox('foldAllSteps'))
         row('默认只留一个按钮', checkbox('mergeByDefault'))
         row('按钮显示文字', checkbox('stepLabels'))
+        row('每轮显示耗时', checkbox('turnTimer'))
         row('输入框可拖动调高', checkbox('composerResize'))
 
         // 右侧栏宽度：百分比存进设置（重启后保持），像素由宿主 layout store 管。
@@ -2826,6 +2879,9 @@
           for (const [, handle] of composerHandles) handle.remove()
           composerHandles.clear()
           for (const seat of composerSeats()) seat.style.removeProperty('--dsh-composer-text-max-height')
+          turnTimerOff?.()
+          turnTimerOff = null
+          for (const chip of doc.querySelectorAll('[data-lf-turn-timer]')) chip.remove()
           clipAll()
           panel?.remove()
           scrim?.remove()
@@ -2941,6 +2997,7 @@
           toggle('foldAllSteps', '步骤默认收起', '每一段工作步骤默认折起，最新一轮也一样。'),
           toggle('mergeByDefault', '默认只留一个按钮', '每轮回复上方只显示「展开全部」；点开才摊开各条折叠缝，内容仍收起。'),
           toggle('stepLabels', '按钮显示文字', '开：三个按钮各带「展开全部 / 展开所有步骤 / 展开本步骤」文字；关：只留三个不同的箭头图标。'),
+          toggle('turnTimer', '每轮显示耗时', '在每轮对话末尾显示该轮从收到命令到完成输出的用时（取自宿主的步计时数据）。'),
           toggle('composerResize', '输入框可拖动调高', '在输入框卡片顶部显示一条拖拽手柄。'),
           h(Row, {
             label: '右侧栏占比 (%)',
@@ -3072,6 +3129,89 @@
     return { createFindPanel }
   })()
 
+  // ---- ./src/turn-timer.js
+  const turnTimer = (() => {
+    // Per-turn duration chips — pure logic plus a tiny plain store.
+    //
+    // Data source (read-only, display-only like the rest of this plugin): the chat
+    // snapshot's settled nodes, each carrying `turn` and `timing`
+    // { stepStartTime, firstTokenTime, completedTime }. A Turn's duration is the
+    // span from its FIRST step's start to its LAST step's completion — i.e. from
+    // the host beginning to process the command to the final output landing.
+    // (Verified pattern against gbeta/dsh-token-speed lib/client.js, MIT.)
+    //
+    // No DOM access here, so everything is unit-testable in plain Node.
+
+    /**
+     * Human label for a duration: seconds below a minute ("3.2秒" / "42秒"),
+     * minutes above ("1分12秒"). Invalid input yields ''.
+     */
+    function formatDuration(ms) {
+      const value = Number(ms)
+      if (!Number.isFinite(value) || value < 0) return ''
+      const seconds = value / 1000
+      if (seconds < 60) return `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)}秒`
+      const minutes = Math.floor(seconds / 60)
+      const rest = Math.round(seconds % 60)
+      return `${minutes}分${rest}秒`
+    }
+
+    /**
+     * Fold settled assistant nodes into { turn: milliseconds }.
+     * A step without usable timing is skipped; a Turn with no timed step has no
+     * entry, which is exactly what the DOM layer needs to leave it chip-less.
+     */
+    function turnDurations(nodes) {
+      const spans = {}
+      if (!Array.isArray(nodes)) return {}
+      for (const node of nodes) {
+        if (!node || node.kind !== 'assistant') continue
+        const timing = node.timing
+        if (!timing) continue
+        const start = timing.stepStartTime
+        const end = timing.completedTime
+        if (typeof start !== 'number' || typeof end !== 'number') continue
+        if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) continue
+        const key = Number(node.turn)
+        if (!Number.isFinite(key)) continue
+        const span = spans[key] ?? (spans[key] = { start, end })
+        if (start < span.start) span.start = start
+        if (end > span.end) span.end = end
+      }
+      const durations = {}
+      for (const key of Object.keys(spans)) durations[key] = spans[key].end - spans[key].start
+      return durations
+    }
+
+    /** Plain observable store bridging the snapshot probe and the DOM pass. */
+    function createTurnTimerStore() {
+      let durations = {}
+      const listeners = new Set()
+      return {
+        get: () => durations,
+        set(next) {
+          durations = next && typeof next === 'object' ? next : {}
+          for (const listener of [...listeners]) {
+            try { listener(durations) } catch { /* one bad listener must not break the rest */ }
+          }
+        },
+        subscribe(fn) {
+          if (typeof fn !== 'function') return () => {}
+          listeners.add(fn)
+          return () => listeners.delete(fn)
+        },
+        clear() {
+          durations = {}
+          for (const listener of [...listeners]) {
+            try { listener(durations) } catch { /* ignore */ }
+          }
+        }
+      }
+    }
+
+    return { formatDuration, turnDurations, createTurnTimerStore }
+  })()
+
   MODULES['./src/fold.js'] = fold
   MODULES['./src/browser.js'] = browser
   MODULES['./src/settings-panel.js'] = settingsPanel
@@ -3108,6 +3248,7 @@
       const local = window.__DSH_BUBBLE_FOLD_MODULES__ ?? {}
       const { start } = local['./src/browser.js']
       const fold = local['./src/fold.js']
+      const turnTimer = local['./src/turn-timer.js']
       const { createPanel } = local['./src/settings-panel.js']
       const { createFindPanel } = local['./src/find-panel.js']
 
@@ -3131,6 +3272,11 @@
       let focusFindInput = null
       /** Two-way sync with the host's right-sidebar width; null when unsupported. */
       let rightbar = null
+      /** Per-turn duration store: filled by the snapshot probe, read by the DOM pass. */
+      const turnTimers = turnTimer?.createTurnTimerStore?.() ?? null
+      /** Off-handle for the invisible shell.overlay probe + its snapshot unsubscribe. */
+      let convOff = null
+      let timerProbeSub = null
 
       // Stable api object for the settings tab and the find panel: the components
       // mount on first selection (possibly before or after a restart of the fold),
@@ -3166,6 +3312,11 @@
         findTitleOff?.()
         findPanelOff?.()
         rightbar?.dispose()
+        convOff?.()
+        timerProbeSub?.()
+        turnTimers?.clear?.()
+        convOff = null
+        timerProbeSub = null
         panelOff = null
         findTabOff = null
         findTitleOff = null
@@ -3545,7 +3696,8 @@
                 setRatio: (ratio) => rightbar?.setRatio(ratio),
                 info: () => rightbar?.info() ?? null
               },
-              __DSH_BUBBLE_FOLD_MODULES__: { fold }
+              turnTimers,
+              __DSH_BUBBLE_FOLD_MODULES__: { fold, turnTimer }
             }, React)
           } catch (error) {
             // A failed fold must never take the conversation down with it.
@@ -3680,6 +3832,64 @@
               prevDispose()
             }
           }
+
+          // 每轮耗时探针：一个不可见的 shell.overlay 组件，借宿主注入的 useSessions
+          // 拿到当前会话，订阅聊天快照的 settled 节点（每个带 turn 与 timing
+          // { stepStartTime, completedTime }），把"每轮从收到命令到完成输出"的
+          // 毫秒数写进纯数据 store；DOM 层的徽标只读这个 store，整条链路仍是
+          // display-only。（数据接法对照 gbeta/dsh-token-speed 的实测写法，MIT。）
+          const setupTurnTimer = (attempt) => {
+            if (disposed) return
+            let conv = null
+            try { conv = ctx?.get?.('uiConversation') ?? null } catch { conv = null }
+            if (!conv || typeof conv.binding !== 'function') {
+              if (attempt < 10) view.setTimeout(() => setupTurnTimer(attempt + 1), 400)
+              else console.warn('[fold-polish] 此宿主未暴露 uiConversation，每轮耗时不可用')
+              return
+            }
+            if (!slots || typeof slots.inject !== 'function' || !turnTimers) return
+            try {
+              const Probe = (props) => {
+                const currentId = props.useSessions((s) => {
+                  const current = s?.current
+                  const entry = s?.byId ? s.byId[current] : undefined
+                  return current !== undefined && entry && entry.blank === false ? current : undefined
+                })
+                React.useEffect(() => {
+                  timerProbeSub?.()
+                  timerProbeSub = null
+                  if (currentId === undefined) {
+                    turnTimers.set({})
+                    return undefined
+                  }
+                  let target = null
+                  try { target = conv.binding(currentId).target('chat') } catch { target = null }
+                  if (!target) {
+                    turnTimers.set({})
+                    return undefined
+                  }
+                  const apply = () => {
+                    let snapshot = null
+                    try { snapshot = target.getSnapshot?.() ?? null } catch { snapshot = null }
+                    turnTimers.set(turnTimer.turnDurations(snapshot?.legacy?.nodes ?? []))
+                  }
+                  apply()
+                  try {
+                    timerProbeSub = typeof target.subscribe === 'function' ? target.subscribe(apply) : null
+                  } catch { timerProbeSub = null }
+                  return () => { timerProbeSub?.(); timerProbeSub = null }
+                }, [currentId])
+                return null
+              }
+              convOff = slots.inject('shell.overlay', () => slots.register(
+                { name: 'shell.overlay', id: 'fold-polish-turn-timer', order: 110, label: '每轮耗时' },
+                Probe))
+            } catch (error) {
+              console.warn('[fold-polish] 每轮耗时探针注册失败：', error)
+              convOff = null
+            }
+          }
+          setupTurnTimer(0)
 
           // Console handle: __DSH_BUBBLE_FOLD__.status / .settings() / .stats()
           window.__DSH_BUBBLE_FOLD__ = {

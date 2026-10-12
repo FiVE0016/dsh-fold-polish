@@ -292,6 +292,7 @@ test('the settings page covers every setting the in-page panel has', async () =>
     '步骤默认收起',
     '默认只留一个按钮',
     '按钮显示文字',
+    '每轮显示耗时',
     '输入框可拖动调高',
     '右侧栏占比 (%)',
     '输入框高度'

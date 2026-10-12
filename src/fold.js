@@ -68,6 +68,8 @@ export const DEFAULT_SETTINGS = Object.freeze({
   mergeByDefault: true,
   /** Put the text (展开步骤/收起步骤) on the seam bubble, not just the icon. */
   stepLabels: false,
+  /** Stamp each Turn's end with how long the round took (收到命令 → 输出完成). */
+  turnTimer: true,
   /** Preferred right-sidebar width, as a percent of the frame (30–70). */
   rightbarRatio: 45
 })
@@ -98,6 +100,7 @@ export function normalizeSettings(input) {
     composerResize: clampBool(raw.composerResize, DEFAULT_SETTINGS.composerResize),
     mergeByDefault: clampBool(raw.mergeByDefault, DEFAULT_SETTINGS.mergeByDefault),
     stepLabels: clampBool(raw.stepLabels, DEFAULT_SETTINGS.stepLabels),
+    turnTimer: clampBool(raw.turnTimer, DEFAULT_SETTINGS.turnTimer),
     rightbarRatio: clampInt(raw.rightbarRatio, LIMITS.minRightbarRatio, LIMITS.maxRightbarRatio, DEFAULT_SETTINGS.rightbarRatio)
   }
 }

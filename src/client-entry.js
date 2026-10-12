@@ -25,6 +25,7 @@ window.__ModuleLoader__.load({
     const local = window.__DSH_BUBBLE_FOLD_MODULES__ ?? {}
     const { start } = local['./src/browser.js']
     const fold = local['./src/fold.js']
+    const turnTimer = local['./src/turn-timer.js']
     const { createPanel } = local['./src/settings-panel.js']
     const { createFindPanel } = local['./src/find-panel.js']
 
@@ -48,6 +49,11 @@ window.__ModuleLoader__.load({
     let focusFindInput = null
     /** Two-way sync with the host's right-sidebar width; null when unsupported. */
     let rightbar = null
+    /** Per-turn duration store: filled by the snapshot probe, read by the DOM pass. */
+    const turnTimers = turnTimer?.createTurnTimerStore?.() ?? null
+    /** Off-handle for the invisible shell.overlay probe + its snapshot unsubscribe. */
+    let convOff = null
+    let timerProbeSub = null
 
     // Stable api object for the settings tab and the find panel: the components
     // mount on first selection (possibly before or after a restart of the fold),
@@ -83,6 +89,11 @@ window.__ModuleLoader__.load({
       findTitleOff?.()
       findPanelOff?.()
       rightbar?.dispose()
+      convOff?.()
+      timerProbeSub?.()
+      turnTimers?.clear?.()
+      convOff = null
+      timerProbeSub = null
       panelOff = null
       findTabOff = null
       findTitleOff = null
@@ -462,7 +473,8 @@ window.__ModuleLoader__.load({
               setRatio: (ratio) => rightbar?.setRatio(ratio),
               info: () => rightbar?.info() ?? null
             },
-            __DSH_BUBBLE_FOLD_MODULES__: { fold }
+            turnTimers,
+            __DSH_BUBBLE_FOLD_MODULES__: { fold, turnTimer }
           }, React)
         } catch (error) {
           // A failed fold must never take the conversation down with it.
@@ -597,6 +609,64 @@ window.__ModuleLoader__.load({
             prevDispose()
           }
         }
+
+        // 每轮耗时探针：一个不可见的 shell.overlay 组件，借宿主注入的 useSessions
+        // 拿到当前会话，订阅聊天快照的 settled 节点（每个带 turn 与 timing
+        // { stepStartTime, completedTime }），把"每轮从收到命令到完成输出"的
+        // 毫秒数写进纯数据 store；DOM 层的徽标只读这个 store，整条链路仍是
+        // display-only。（数据接法对照 gbeta/dsh-token-speed 的实测写法，MIT。）
+        const setupTurnTimer = (attempt) => {
+          if (disposed) return
+          let conv = null
+          try { conv = ctx?.get?.('uiConversation') ?? null } catch { conv = null }
+          if (!conv || typeof conv.binding !== 'function') {
+            if (attempt < 10) view.setTimeout(() => setupTurnTimer(attempt + 1), 400)
+            else console.warn('[fold-polish] 此宿主未暴露 uiConversation，每轮耗时不可用')
+            return
+          }
+          if (!slots || typeof slots.inject !== 'function' || !turnTimers) return
+          try {
+            const Probe = (props) => {
+              const currentId = props.useSessions((s) => {
+                const current = s?.current
+                const entry = s?.byId ? s.byId[current] : undefined
+                return current !== undefined && entry && entry.blank === false ? current : undefined
+              })
+              React.useEffect(() => {
+                timerProbeSub?.()
+                timerProbeSub = null
+                if (currentId === undefined) {
+                  turnTimers.set({})
+                  return undefined
+                }
+                let target = null
+                try { target = conv.binding(currentId).target('chat') } catch { target = null }
+                if (!target) {
+                  turnTimers.set({})
+                  return undefined
+                }
+                const apply = () => {
+                  let snapshot = null
+                  try { snapshot = target.getSnapshot?.() ?? null } catch { snapshot = null }
+                  turnTimers.set(turnTimer.turnDurations(snapshot?.legacy?.nodes ?? []))
+                }
+                apply()
+                try {
+                  timerProbeSub = typeof target.subscribe === 'function' ? target.subscribe(apply) : null
+                } catch { timerProbeSub = null }
+                return () => { timerProbeSub?.(); timerProbeSub = null }
+              }, [currentId])
+              return null
+            }
+            convOff = slots.inject('shell.overlay', () => slots.register(
+              { name: 'shell.overlay', id: 'fold-polish-turn-timer', order: 110, label: '每轮耗时' },
+              Probe))
+          } catch (error) {
+            console.warn('[fold-polish] 每轮耗时探针注册失败：', error)
+            convOff = null
+          }
+        }
+        setupTurnTimer(0)
 
         // Console handle: __DSH_BUBBLE_FOLD__.status / .settings() / .stats()
         window.__DSH_BUBBLE_FOLD__ = {
