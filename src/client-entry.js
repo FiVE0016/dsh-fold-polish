@@ -633,12 +633,26 @@ window.__ModuleLoader__.load({
             return
           }
           if (!turnTimers) return
+          // 诊断留痕：哪一步取不到，问题就在哪一步。
+          const turnTimerDiag = {
+            attempts: 0,
+            services: {},
+            sessionId: null,
+            target: null,
+            nodes: null,
+            durations: null,
+            lastError: null,
+            polls: 0
+          }
+          window.__DSH_BUBBLE_FOLD_TURN_TIMER_DIAG__ = turnTimerDiag
           // 当前会话 id：sessions 服务的多个可能形状都试一遍，全部拿不到就
           // 退到"最近一个可用会话"，再不行就静默（徽标缺席，其余功能不受影响）。
           const pickSessionId = () => {
             let sessions = null
             try { sessions = ctx?.get?.('sessions') ?? null } catch { sessions = null }
-            if (!sessions) return null
+            if (!sessions) { turnTimerDiag.services.sessions = 'missing'; return null }
+            turnTimerDiag.services.sessions = typeof sessions
+            turnTimerDiag.services.sessionsKeys = (() => { try { return Object.keys(sessions).slice(0, 20) } catch { return null } })()
             const current = sessions.current ?? sessions.currentId ?? null
             if (typeof current === 'string' && current) return current
             const byId = sessions.byId
@@ -651,19 +665,27 @@ window.__ModuleLoader__.load({
               const last = list[list.length - 1]
               return typeof last === 'string' ? last : (last?.id ?? null)
             }
+            turnTimerDiag.services.sessionsList = list === null ? 'not-array' : list.length
             return null
           }
           let lastSignature = ''
           const pull = () => {
             if (disposed) return
+            turnTimerDiag.polls += 1
             const sessionId = pickSessionId()
+            turnTimerDiag.sessionId = sessionId
             if (!sessionId) { turnTimers.set({}); return }
             let target = null
-            try { target = conv.binding(sessionId).target('chat') } catch { target = null }
+            try { target = conv.binding(sessionId).target('chat') } catch (error) { turnTimerDiag.lastError = String(error) }
+            turnTimerDiag.target = target ? 'ok' : 'null'
             if (!target) { turnTimers.set({}); return }
             let snapshot = null
-            try { snapshot = target.getSnapshot?.() ?? null } catch { snapshot = null }
-            const durations = turnTimer.turnDurations(snapshot?.legacy?.nodes ?? [])
+            try { snapshot = target.getSnapshot?.() ?? null } catch (error) { turnTimerDiag.lastError = String(error) }
+            turnTimerDiag.snapshot = snapshot ? Object.keys(snapshot) : 'null'
+            const nodes = snapshot?.legacy?.nodes ?? []
+            turnTimerDiag.nodes = Array.isArray(nodes) ? nodes.length : 'not-array'
+            const durations = turnTimer.turnDurations(nodes)
+            turnTimerDiag.durations = durations
             const signature = sessionId + '|' + JSON.stringify(durations)
             if (signature === lastSignature) return
             lastSignature = signature
@@ -696,6 +718,11 @@ window.__ModuleLoader__.load({
           dragLog: () => controller?.dragLog() ?? [],
           setRightbarRatio: (ratio) => rightbar?.setRatio(ratio),
           rightbar: () => rightbar?.info() ?? null,
+          turnTimer: () => ({
+            probe: view.__DSH_BUBBLE_FOLD_TURN_TIMER_DIAG__ ?? null,
+            dom: view.__DSH_BUBBLE_FOLD_TURN_TIMER_DOM__ ?? null,
+            store: turnTimers?.get?.() ?? null
+          }),
           // Diagnostic for the right-sidebar width feature: dumps the host layout
           // service's real shape, so a mis-synced width can be reported precisely.
           layoutDebug: () => {

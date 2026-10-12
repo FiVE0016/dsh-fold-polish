@@ -1232,9 +1232,19 @@ export function start(win, React) {
    */
   function syncTurnTimers() {
     const durations = turnTimers?.get?.() ?? {}
+    const diag = win.__DSH_BUBBLE_FOLD_TURN_TIMER_DOM__ ?? (win.__DSH_BUBBLE_FOLD_TURN_TIMER_DOM__ = {})
+    diag.containers = 0
+    diag.withKey = 0
+    diag.withDuration = 0
+    diag.chips = 0
+    diag.durations = durations
+    diag.setting = settings.turnTimer
     for (const container of doc.querySelectorAll('[data-chat-turn]')) {
+      diag.containers += 1
       const key = turnIdOf(container)
+      if (key !== null) diag.withKey += 1
       const ms = key === null ? undefined : durations[key]
+      if (typeof ms === 'number') diag.withDuration += 1
       let chip = null
       for (const child of container.children) {
         if (child.hasAttribute?.('data-lf-turn-timer')) { chip = child; break }
@@ -1250,6 +1260,7 @@ export function start(win, React) {
       }
       const label = `本轮用时 ${TT ? TT.formatDuration(ms) : ''}`
       if (chip.textContent !== label) chip.textContent = label
+      diag.chips += 1
     }
   }
 
