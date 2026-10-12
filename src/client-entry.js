@@ -422,7 +422,11 @@ window.__ModuleLoader__.load({
 
     const plugin = {
       name: 'dsh-fold-polish',
-      inject: ['slots'],
+      // `uiConversation` / `sessions` must both be declared: the restricted
+      // context only hands out services this row asked for. Without them
+      // ctx.get(...) is null and the per-turn timer silently degrades to a
+      // settings row with no chip.
+      inject: ['slots', 'uiConversation', 'sessions'],
       /**
        * The row is `dsh.client.immediately`, i.e. part of the boot graph: if this
        * throws, the HOST fails to start and the reader gets a "cannot start" dialog
@@ -610,11 +614,15 @@ window.__ModuleLoader__.load({
           }
         }
 
-        // 每轮耗时探针：一个不可见的 shell.overlay 组件，借宿主注入的 useSessions
-        // 拿到当前会话，订阅聊天快照的 settled 节点（每个带 turn 与 timing
-        // { stepStartTime, completedTime }），把"每轮从收到命令到完成输出"的
-        // 毫秒数写进纯数据 store；DOM 层的徽标只读这个 store，整条链路仍是
-        // display-only。（数据接法对照 gbeta/dsh-token-speed 的实测写法，MIT。）
+        // 每轮耗时探针：纯 ctx 驱动，不依赖宿主往组件里注入什么 props。
+        // 数据源是 uiConversation 的 chat binding（只读）：binding(sessionId)
+        // .target('chat').getSnapshot() 的 legacy.nodes 里，每个已结算的
+        // assistant 节点带 turn 与 timing { stepStartTime, completedTime }，
+        // 一轮的耗时 = 该轮首个 step 的开始 → 末步的完成（工具间隔也计入）。
+        // 当前会话 id 从 sessions 服务取（宿主自己的 inject 就用这个名字），
+        // 取不到就保持静默；快照没有订阅接口，所以用低频轮询，且只在
+        // 会话/轮次真的变化时重写 store。（数据接法对照 gbeta/dsh-token-speed
+        // 实测的 binding/target/getSnapshot 路线，MIT。）
         const setupTurnTimer = (attempt) => {
           if (disposed) return
           let conv = null
@@ -624,47 +632,51 @@ window.__ModuleLoader__.load({
             else console.warn('[fold-polish] 此宿主未暴露 uiConversation，每轮耗时不可用')
             return
           }
-          if (!slots || typeof slots.inject !== 'function' || !turnTimers) return
-          try {
-            const Probe = (props) => {
-              const currentId = props.useSessions((s) => {
-                const current = s?.current
-                const entry = s?.byId ? s.byId[current] : undefined
-                return current !== undefined && entry && entry.blank === false ? current : undefined
-              })
-              React.useEffect(() => {
-                timerProbeSub?.()
-                timerProbeSub = null
-                if (currentId === undefined) {
-                  turnTimers.set({})
-                  return undefined
-                }
-                let target = null
-                try { target = conv.binding(currentId).target('chat') } catch { target = null }
-                if (!target) {
-                  turnTimers.set({})
-                  return undefined
-                }
-                const apply = () => {
-                  let snapshot = null
-                  try { snapshot = target.getSnapshot?.() ?? null } catch { snapshot = null }
-                  turnTimers.set(turnTimer.turnDurations(snapshot?.legacy?.nodes ?? []))
-                }
-                apply()
-                try {
-                  timerProbeSub = typeof target.subscribe === 'function' ? target.subscribe(apply) : null
-                } catch { timerProbeSub = null }
-                return () => { timerProbeSub?.(); timerProbeSub = null }
-              }, [currentId])
-              return null
+          if (!turnTimers) return
+          // 当前会话 id：sessions 服务的多个可能形状都试一遍，全部拿不到就
+          // 退到"最近一个可用会话"，再不行就静默（徽标缺席，其余功能不受影响）。
+          const pickSessionId = () => {
+            let sessions = null
+            try { sessions = ctx?.get?.('sessions') ?? null } catch { sessions = null }
+            if (!sessions) return null
+            const current = sessions.current ?? sessions.currentId ?? null
+            if (typeof current === 'string' && current) return current
+            const byId = sessions.byId
+            if (byId && typeof byId === 'object') {
+              const ids = Object.keys(byId)
+              if (ids.length > 0) return ids[ids.length - 1]
             }
-            convOff = slots.inject('shell.overlay', () => slots.register(
-              { name: 'shell.overlay', id: 'fold-polish-turn-timer', order: 110, label: '每轮耗时' },
-              Probe))
-          } catch (error) {
-            console.warn('[fold-polish] 每轮耗时探针注册失败：', error)
-            convOff = null
+            const list = typeof sessions.list === 'function' ? sessions.list() : null
+            if (Array.isArray(list) && list.length > 0) {
+              const last = list[list.length - 1]
+              return typeof last === 'string' ? last : (last?.id ?? null)
+            }
+            return null
           }
+          let lastSignature = ''
+          const pull = () => {
+            if (disposed) return
+            const sessionId = pickSessionId()
+            if (!sessionId) { turnTimers.set({}); return }
+            let target = null
+            try { target = conv.binding(sessionId).target('chat') } catch { target = null }
+            if (!target) { turnTimers.set({}); return }
+            let snapshot = null
+            try { snapshot = target.getSnapshot?.() ?? null } catch { snapshot = null }
+            const durations = turnTimer.turnDurations(snapshot?.legacy?.nodes ?? [])
+            const signature = sessionId + '|' + JSON.stringify(durations)
+            if (signature === lastSignature) return
+            lastSignature = signature
+            turnTimers.set(durations)
+          }
+          pull()
+          // 低频轮询：一轮对话以秒计，1s 的采样既跟得上也不构成开销。
+          let timerPoll = null
+          timerProbeSub = () => {
+            if (timerPoll) view.clearInterval(timerPoll)
+            timerPoll = null
+          }
+          timerPoll = view.setInterval(pull, 1000)
         }
         setupTurnTimer(0)
 

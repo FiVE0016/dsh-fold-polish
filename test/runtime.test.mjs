@@ -1492,7 +1492,8 @@ console.log('bundled artifact (client.js)')
         assert.deepEqual(hostRequests, ['react'], 'the host resolver must be asked for react only')
         assert.equal(typeof plugin.apply, 'function')
         // The settings tab depends on the slots service; the DOM fold does not.
-        assert.deepEqual(plugin.inject, ['slots'])
+        // uiConversation feeds the per-turn timer probe and degrades when absent.
+        assert.deepEqual(plugin.inject, ['slots', 'uiConversation', 'sessions'])
         assert.equal(win.__DSH_BUBBLE_FOLD__, undefined)
         assert.equal(win.document.getElementById('dsh-bubble-fold-styles'), null)
         // Now the host activates the row; apply() hands back its disposer.
