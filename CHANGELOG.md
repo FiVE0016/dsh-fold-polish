@@ -1,8 +1,8 @@
 # 更新记录
 
-## 0.10.3 — 放大镜图标
+## 0.10.3 — 放大镜图标（自绘 SVG）
 
-- **右栏「查找」tab 指南页菜单加图标** — `guide[].icon` 填入 `IconSearchOutline16`（宿主内置放大镜图标，来自 `@deepseek-ai/dsh-client-ui-primitives`）。同步加 `dsh.client.inject` + `dsh.client.external` 声明，测试套件更新为允许 baseline + 已声明 external 模块。回归检查 29/29 通过。
+- **右栏「查找」tab 指南页菜单加图标** — 自绘 `SearchIcon` SVG 组件（镜筒圆环 + 镜柄，viewBox 0 0 16 16，fill="currentColor"），与 dsh-model-picker 的 `WhaleIcon` 同一模式。原方案依赖 `@deepseek-ai/dsh-client-ui-primitives` 的 `IconSearchOutline16`，但宿主运行时 `require()` 返回空对象，图标不显示；改为自绘后不依赖外部包，稳定可用。回归检查 29/29 通过。
 
 ## 0.10.2 — 2026-10-13
 
