@@ -10,3 +10,6 @@ test/o.txt
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# 修复前的本机备份（一次性本地产物，用于回退；需要时从 git 历史取）
+*.bak-*
