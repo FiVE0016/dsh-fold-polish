@@ -1409,11 +1409,16 @@ console.log('bundled artifact (client.js)')
 {
   // The built bundle is ESM-marked but must not use import/export syntax itself.
   const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
+  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
   const loader = { registration: null, require: null }
   const bundleWindow = {
     __ModuleLoader__: {
       load(registration) { loader.registration = registration },
-      require: (name) => { throw new Error(`unexpected host module request: ${name}`) }
+      require: (name) => {
+        if (name === 'react') return {}
+        if (name === '@deepseek-ai/dsh-client-ui-primitives') return { IconSearchOutline16: () => null }
+        throw new Error(`unexpected host module request: ${name}`)
+      }
     }
   }
 
@@ -1432,10 +1437,15 @@ console.log('bundled artifact (client.js)')
     assert.equal(loader.registration.factory.length, 1, 'factory must take the host resolver')
   })
   test('bundle declares no external host modules', () => {
-    // Only react may be requested; anything else would need dsh.client.external.
+    // Only baseline (react) and modules declared in dsh.client.external may be
+    // requested; anything else would be an undeclared dependency the host
+    // cannot resolve.
     const requested = [...source.matchAll(/require\(['"]([^'"]+)['"]\)/g)].map((m) => m[1])
     const external = [...new Set(requested)].filter((name) => !name.startsWith('./'))
-    assert.deepEqual(external, ['react'])
+    const declaredExternal = new Set(pkg.dsh.client.external ?? [])
+    const baseline = new Set(['react', 'react-dom', 'react/jsx-runtime'])
+    const undeclared = external.filter((name) => !baseline.has(name) && !declaredExternal.has(name))
+    assert.deepEqual(undeclared, [], `undeclared external modules: ${undeclared.join(', ')}`)
   })
 
   const fixture = buildFixture()
@@ -1447,6 +1457,7 @@ console.log('bundled artifact (client.js)')
     load(registration) { loader.registration = registration },
     require: (name) => {
       if (name === 'react') return {}
+      if (name === '@deepseek-ai/dsh-client-ui-primitives') return { IconSearchOutline16: () => null }
       throw new Error(`unexpected host module request: ${name}`)
     }
   }
@@ -1464,21 +1475,26 @@ console.log('bundled artifact (client.js)')
       try {
         // Materialize the factory WITHOUT applying it: this is the "lazy module
         // body" step. The argument models the HOST resolver exactly: it knows
-        // `react` and nothing else, and every request is recorded, because the
-        // bundle must resolve its OWN sources from the local registry. Both ways
-        // of getting this wrong have already booted the app into a crash dialog:
+        // the baseline (react) and any declared external, and every request is
+        // recorded, because the bundle must resolve its OWN sources from the
+        // local registry. Both ways of getting this wrong have already booted
+        // the app into a crash dialog:
         //   - asking it for "./src/browser.js" → "missed the module table"
         //   - not calling it at all           → "host module unavailable: react"
         const hostRequests = []
         const plugin = loader.registration.factory((spec) => {
           hostRequests.push(spec)
           if (spec === 'react') return { createElement: () => null }
+          if (spec === '@deepseek-ai/dsh-client-ui-primitives') return { IconSearchOutline16: () => null }
           throw new Error(
             `client-modules: require("${spec}") missed the module table — ` +
             'not a platform seed word, not a materialized module, and no registered package factory'
           )
         })
-        assert.deepEqual(hostRequests, ['react'], 'the host resolver must be asked for react only')
+        const declaredExternal = new Set(pkg.dsh.client.external ?? [])
+        const baseline = new Set(['react', 'react-dom', 'react/jsx-runtime'])
+        const expectedRequests = hostRequests.filter((name) => baseline.has(name) || declaredExternal.has(name))
+        assert.deepEqual(hostRequests, expectedRequests, 'every host request must be baseline or declared external')
         assert.equal(typeof plugin.apply, 'function')
         // The settings tab depends on the slots service; the DOM fold does not.
         // uiConversation feeds the per-turn timer probe and degrades when absent.

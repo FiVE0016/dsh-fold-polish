@@ -3591,6 +3591,11 @@
     id: 'dsh-fold-polish',
     factory: (require) => {
       const React = require('react')
+      // The host's icon set may be absent in a bare test host; fall back to no
+      // icon (the guide entry still renders, just without a glyph) rather than
+      // throwing on a missing package.
+      const primitives = require('@deepseek-ai/dsh-client-ui-primitives') ?? {}
+      const IconSearchOutline16 = primitives.IconSearchOutline16 ?? null
       const local = window.__DSH_BUBBLE_FOLD_MODULES__ ?? {}
       const { start } = local['./src/browser.js']
       const fold = local['./src/fold.js']
@@ -4109,7 +4114,11 @@
           }
         },
         applyRow(ctx) {
-          if (controller !== null) return
+          console.log('[fold-polish] apply 进入')
+          if (controller !== null) {
+            console.log('[fold-polish] 已在运行，跳过（findTabRegistered=' + findTabRegistered + '）')
+            return
+          }
           try {
             // The layout service belongs to the shell plugin and may still be
             // activating when this row runs, exactly like sidebarRightTabs — asking
@@ -4190,7 +4199,19 @@
             }
             if (!slots || !tabs || typeof tabs.register !== 'function') return false
             try {
-              findTabOff = tabs.register({ id: FIND_TAB_ID, kind: FIND_TAB_ID, title: () => '查找' })
+              findTabOff = tabs.register({
+                id: FIND_TAB_ID,
+                kind: FIND_TAB_ID,
+                priority: 'extension',
+                title: () => '查找',
+                guide: [{
+                  id: 'find',
+                  order: 20,
+                  title: () => '查找',
+                  description: () => '搜索本会话（含折叠内容）',
+                  ...(IconSearchOutline16 ? { icon: IconSearchOutline16 } : {})
+                }]
+              })
               findPanelOff = slots.inject('sidebar.right.pane.tab', () => slots.register({
                 name: 'sidebar.right.pane.tab',
                 key: FIND_TAB_ID,
@@ -4201,6 +4222,7 @@
                 key: FIND_TAB_ID
               }, FindTitle))
               findTabRegistered = true
+              console.log('[fold-polish] 右栏「查找」tab 已注册（id=' + FIND_TAB_ID + '）')
               return true
             } catch (error) {
               console.warn('[fold-polish] 右栏查找注册失败：', error)
@@ -4351,6 +4373,7 @@
           window.__DSH_BUBBLE_FOLD__ = {
             plugin: 'dsh-bubble-fold',
             status: controller ? 'running' : 'failed',
+            findTabRegistered,
             rescan: () => controller?.rescan(),
             settings: () => controller?.settings(),
             stats: () => controller?.stats(),
