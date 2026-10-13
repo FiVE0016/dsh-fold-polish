@@ -30,13 +30,22 @@ export const COMPOSER_DEFAULT = 336
 
 // Ancestor markers that mean "this is not a message body" — tool output, a folded
 // process envelope, context injection, a system prompt card, or an error row.
-const SKIP_ANCESTORS = [
+//
+// 2026-10-13 拆分：真机诊断（stats.side.skipAncestor = 37739）证明宿主更新后把
+// assistant-step 回复行包进了过程容器（[data-turn-process] / [data-step-process] /
+// [data-step-process-content]），按老契约整表跳过就把「助手回复」全误杀了 —— 这是
+// 「助手回复不再折叠、展开全文按钮消失」的根因。回复行自身的 flow-kind 已证明它是
+// 正文，所以对它只保留「标记类」跳过（标记在锚点自身或祖先上都生效，closest 从
+// 自身开始匹配）；「容器类」仍对 user/steering 生效，行为与老契约一致。
+const SKIP_CONTAINERS = [
+  '[data-turn-process]',
+  '[data-step-process]',
+  '[data-step-process-content]'
+].join(',')
+const SKIP_MARKERS = [
   '[data-turn-process-hidden]',
   '[data-turn-process-answer]',
   '[data-turn-process-inline]',
-  '[data-turn-process]',
-  '[data-step-process]',
-  '[data-step-process-content]',
   '[data-context-fields]',
   '[data-context-text]',
   '[data-context-injection-body]',
@@ -46,6 +55,7 @@ const SKIP_ANCESTORS = [
   '[data-compaction-icon]',
   '[data-message-attachments]'
 ].join(',')
+const SKIP_ANCESTORS = [SKIP_CONTAINERS, SKIP_MARKERS].join(',')
 
 // A numeric/boolean control is meaningless while its gate is off.
 const TIE = Object.freeze({
@@ -701,7 +711,15 @@ export function start(win, React) {
    * a self-feeding scan loop is invisible from the outside: you can only see it
    * as "the interface is slow".
    */
-  const stats = { scans: 0, mutations: 0, selfMutations: 0, measured: 0 }
+  const stats = {
+    scans: 0,
+    mutations: 0,
+    selfMutations: 0,
+    measured: 0,
+    // 2026-10-13 排查「助手回复不折叠」的探针计数器，随 stats() 导出
+    probe: { cloneOk: 0, cloneNull: 0, cloneNullWhy: {}, fallback: 0, naturalSamples: [] },
+    side: { assistantSeen: 0, latestTurn: 0, limitsOff: 0, skipAncestor: 0, streaming: 0, noBody: 0, offscreen: 0, wrapped: 0, measured: 0, userSeen: 0, userLatest: 0, userSkip: 0, userNoBody: 0, userOffscreen: 0, userWrapped: 0, userMeasured: 0 }
+  }
   /** card element -> the drag handle injected into it */
   const composerHandles = new Map()
   let dragState = null
@@ -790,7 +808,13 @@ export function start(win, React) {
     return Boolean(anchor.querySelector('[data-streaming]'))
   }
 
-  function skipReason(anchor) {
+  function skipReason(anchor, kind) {
+    // 宿主更新后把消息行（user 与 assistant-step）都包进了过程容器
+    // （[data-turn-process] / [data-step-process]），容器不再成为跳过任何
+    // 消息行的理由——消息行自身的 flow-kind 已证明它是正文。只有「标记类」
+    // （隐藏过程成员、答案桩、上下文注入、系统提示、错误行、附件等）仍跳过，
+    // closest 从锚点自身开始匹配，锚点自身带标记同样命中。
+    if (kind === KIND_USER || kind === KIND_ASSISTANT) return anchor.closest(SKIP_MARKERS)
     return anchor.closest(SKIP_ANCESTORS)
   }
 
@@ -1489,14 +1513,16 @@ export function start(win, React) {
   function labelFor(record) {
     const { body, kind } = record
     // 自然高度必须从克隆量：body 正被 max-height 夹着，它的 scrollHeight 是裁剪值，
-    // 直接拿来当「内容总高」会把「还有 N 行」算得严重偏低。
-    const probe = probeNatural(body)
+    // 直接拿来当「内容总高」会把「还有 N 行」算得严重偏低。预算行数与测量同源。
+    const limits = F.settingsForSide(settings, kind)
+    const budgetLines = settings.collapseAll ? settings.collapsedLines : limits.lines
+    const probe = probeNatural(body, budgetLines)
     const contentPx = probe ? probe.natural : body.scrollHeight
     const visiblePx = body.getBoundingClientRect().height
     const lineHeight = probe ? probe.lineHeight : lineHeightOf(body)
-    const lines = F.hiddenLineLabel(contentPx, visiblePx, lineHeight)
+    const hidden = F.hiddenLineLabel(contentPx, visiblePx, lineHeight)
     const name = kind === F.SIDE_USER ? '展开我的输入' : '展开全文'
-    return lines ? `${name} · ${lines}` : name
+    return hidden ? `${name} · ${hidden}` : name
   }
 
   function refreshLabel(record) {
@@ -1556,9 +1582,15 @@ export function start(win, React) {
   /**
    * 量一个 body 的自然（未裁剪）高度与内容结束位置，不扰动真实节点。
    * @param body - 真实节点（可能正被 max-height 夹着）
+   * @param budgetLines - 这一侧的保留行数预算。下刀位置只允许落在预算之内的
+   *   最后一行底部——这与 cutHeightForBody 是同一判据。2026-10-13 修：此前
+   *   这里的 pick 取「所有行的最底部」（= 内容总高度），于是
+   *   `overflows = natural > cutHeight + 8` 恒为假，凡走克隆测量的消息都
+   *   丢按钮、不折叠（胶囊「展开全文 · 还有 N 行」消失的根因）。
+   *   缺省时下刀位置为 0，由调用方用 contentBudget 兜底。
    * @returns { natural, cutHeight, lineHeight, padTop, padBottom, boxSizing } 或 null
    */
-  function probeNatural(body) {
+  function probeNatural(body, budgetLines) {
     if (typeof body.cloneNode !== 'function') return null
     const host = measureHostOf()
     let clone
@@ -1566,6 +1598,8 @@ export function start(win, React) {
       // deep clone：内容、样式类、内联样式都带过去；脚本不执行（cloneNode 不跑 JS）
       clone = body.cloneNode(true)
     } catch {
+      stats.probe.cloneNull += 1
+      stats.probe.cloneNullWhy.cloneThrow = (stats.probe.cloneNullWhy.cloneThrow || 0) + 1
       return null
     }
     // 克隆必须解除一切钳制，否则量到的还是裁剪值。
@@ -1616,18 +1650,29 @@ export function start(win, React) {
       const padTop = Number.parseFloat(style.paddingTop) || 0
       const padBottom = Number.parseFloat(style.paddingBottom) || 0
       const lineHeight = lineHeightOf(clone)
+      const mediaHeight = mediaHeightIn(clone)
+      // 下刀位置的预算：本侧保留行数 × 行高 + 附件总高，与调用方算的
+      // contentBudget 同源，必须在克隆上先量出来（保留行数由调用方传入）。
+      const budget = F.clampHeightFor(budgetLines, lineHeight) + mediaHeight
       const box = clone.getBoundingClientRect()
       // 克隆必须真的被布局过：宽度为 0 说明当前 DOM 实现不产出几何
       // （jsdom / 测试替身），此时克隆上的任何数值都不可信，交给调用方回退。
-      if (!(box.width > 0) || !(box.height > 0)) return null
+      if (!(box.width > 0) || !(box.height > 0)) {
+        stats.probe.cloneNull += 1
+        stats.probe.cloneNullWhy.boxZero = (stats.probe.cloneNullWhy.boxZero || 0) + 1
+        stats.probe.cloneNullWhy.lastBox = [Math.round(box.width), Math.round(box.height)]
+        return null
+      }
       const origin = box.top + (clone.clientTop || 0) + padTop
 
       // 内容结束位置：优先 Range（按行/按文本片段，能在行边界处下刀），
-      // 退回按子元素底边——与 cutHeightFor 同一套判据，只是在克隆上跑。
+      // 退回按子元素底边——与 cutHeightForBody 同一套判据：只接受预算之内
+      // 的行底部并取其中最大者；一行都放不下时返回 0，由调用方兜底。
       const pick = (ends) => {
         let cut = 0
         for (const end of ends) {
           if (end <= 0) continue
+          if (end > budget) continue
           if (cut === 0 || end > cut) cut = end
         }
         return cut
@@ -1653,7 +1698,13 @@ export function start(win, React) {
       // 完全一致）。补了就是重复计算，短文本会从 38 变 46。
       const natural = clone.scrollHeight
       // 量不到自然高度同样不可信，回退
-      if (!(natural > 0)) return null
+      if (!(natural > 0)) {
+        stats.probe.cloneNull += 1
+        stats.probe.cloneNullWhy.naturalZero = (stats.probe.cloneNullWhy.naturalZero || 0) + 1
+        return null
+      }
+      stats.probe.cloneOk += 1
+      if (stats.probe.naturalSamples.length < 6) stats.probe.naturalSamples.push(Math.round(natural))
       result = {
         natural: natural > 0 ? natural : Math.round(box.height),
         cutHeight: cut > 0 ? Math.round(style.boxSizing === 'border-box' ? cut + padTop + padBottom : cut) : 0,
@@ -1662,7 +1713,7 @@ export function start(win, React) {
         padBottom,
         boxSizing: style.boxSizing,
         // 附件总高：克隆里的 img 等同样有几何，量法与 attachmentHeightIn 一致
-        mediaHeight: mediaHeightIn(clone)
+        mediaHeight
       }
     } finally {
       // 无论成败都必须移除克隆：留在 DOM 里会一直占着测量容器
@@ -1694,11 +1745,16 @@ export function start(win, React) {
       const natural = body.scrollHeight
       if (natural > 0) {
         const cut = cutHeightForBody(body, contentBudget)
+        const style = computedStyleOf(body)
         result = {
           natural,
           cutHeight: cut > 0 ? cut : contentBudget,
           lineHeight,
           mediaHeight: mediaHeightIn(body),
+          // 与 probeNatural 返回同一字段集：overflows 的判定必须同量纲
+          padTop: Number.parseFloat(style.paddingTop) || 0,
+          padBottom: Number.parseFloat(style.paddingBottom) || 0,
+          boxSizing: style.boxSizing,
           fallback: true
         }
       }
@@ -1830,13 +1886,15 @@ export function start(win, React) {
     const lines = settings.collapseAll ? settings.collapsedLines : limits.lines
 
     // 全部几何都在屏幕外克隆上量：真实节点全程带着 max-height 不动，
-    // 因此扫描再也不产生「解除→夹回」的布局抖动。
-    let probe = probed ?? probeNatural(body)
+    // 因此扫描再也不产生「解除→夹回」的布局抖动。下刀位置必须带上本侧的
+    // 行数预算，否则量出的下刀位置等于内容总高，overflows 恒假（按钮消失）。
+    let probe = probed ?? probeNatural(body, lines)
     if (probe === null) {
       // 克隆量不到几何（当前 DOM 实现不产出布局，例如测试替身）：
       // 回退到直接在真实节点上量。这条路径在真实浏览器里不会走到，
       // 所以不会把抖动带回来；但不做布局的环境必须还能夹断。
       probe = probeNaturalFallback(body, limits, lines)
+      stats.probe.fallback += 1
     }
     if (probe === null) return
     const lineHeight = probe.lineHeight
@@ -1851,7 +1909,14 @@ export function start(win, React) {
 
     const natural = probe.natural
     const cutHeight = probe.cutHeight > 0 ? probe.cutHeight : contentBudget
-    const overflows = natural > cutHeight + 8
+    // 比较必须同量纲：natural 是 scrollHeight（含上下 padding），cutHeight 是按
+    // box-sizing 换算过的 max-height 值（content-box 下只到内容框）。把 padding
+    // 补回去再比，否则「一行短消息、根本没超预算」也会被判成溢出，多出一个
+    // 按钮并白裁掉 8px —— README 承诺的「短消息不折」就是这样失守的。
+    const cutBoxHeight = cutHeight + (probe.boxSizing === 'border-box'
+      ? 0
+      : (probe.padTop || 0) + (probe.padBottom || 0))
+    const overflows = natural > cutBoxHeight + 8
 
     if (overflows) {
       setAttr(body, 'data-lf-clamped', '1')
@@ -2162,22 +2227,38 @@ export function start(win, React) {
       const side = flowKind === KIND_ASSISTANT ? F.SIDE_ASSISTANT : F.SIDE_USER
       const limits = F.settingsForSide(settings, side)
       const existing = clamped.get(anchor)
+      const isAssistant = side === F.SIDE_ASSISTANT
+      if (isAssistant) stats.side.assistantSeen += 1
+      else stats.side.userSeen += 1
 
       // The latest Turn never folds — not even by collapseAll.
       if (latestTurn !== null && turnIdOf(anchor) === latestTurn) {
+        if (isAssistant) stats.side.latestTurn += 1
+        else stats.side.userLatest += 1
         unwrap(anchor)
         continue
       }
 
       // Cheap, non-measuring branch: keep the bookkeeping honest for every row.
-      if (!limits.enabled || skipReason(anchor) || (side === F.SIDE_ASSISTANT && isStreaming(anchor))) {
+      if (!limits.enabled || skipReason(anchor, flowKind) || (side === F.SIDE_ASSISTANT && isStreaming(anchor))) {
+        if (isAssistant) {
+          if (!limits.enabled) stats.side.limitsOff += 1
+          else if (skipReason(anchor, flowKind)) stats.side.skipAncestor += 1
+          else stats.side.streaming += 1
+        } else {
+          stats.side.userSkip += 1
+        }
         if (side === F.SIDE_ASSISTANT && isStreaming(anchor)) streaming.push(anchor)
         unwrap(anchor)
         continue
       }
       // Off-screen rows keep whatever fit they already have: measuring each one
       // costs a forced layout, and nobody can see the result.
-      if (existing === undefined && !isNearViewport(anchor)) continue
+      if (existing === undefined && !isNearViewport(anchor)) {
+        if (isAssistant) stats.side.offscreen += 1
+        else stats.side.userOffscreen += 1
+        continue
+      }
 
       seen.add(anchor)
       stats.measured += 1
@@ -2192,9 +2273,15 @@ export function start(win, React) {
       }
       if (!record) {
         const body = messageBodyOf(anchor, flowKind)
-        if (!body) continue
+        if (!body) {
+          if (isAssistant) stats.side.noBody += 1
+          else stats.side.userNoBody += 1
+          continue
+        }
         record = wrap(anchor, side, body)
       }
+      if (isAssistant) stats.side.wrapped += 1
+      else stats.side.userWrapped += 1
       // Skip the measurement pass for settled rows whose geometry has not moved.
       // 指纹必须**不测量**：任何测量在克隆不可用的环境里都会退化成
       // 「解除 max-height → 量 → 还原」，那是每轮白写 4 个属性的自我喂食。
@@ -2204,6 +2291,8 @@ export function start(win, React) {
       if (measured.get(anchor) === signature) continue
       measured.set(anchor, signature)
       measureAndClamp(anchor, side, record)
+      if (isAssistant) stats.side.measured += 1
+      else stats.side.userMeasured += 1
     }
 
     if (budgetLeft) {

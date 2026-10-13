@@ -1,5 +1,13 @@
 # 更新记录
 
+## 0.10.2 — 2026-10-13
+
+- **修（严重）：消息下方的胶囊折叠键（`展开全文 · 还有 N 行` / `展开我的输入 · 还有 N 行`）全部消失，消息也不再折叠。** 根因在屏幕外克隆测量：算「下刀位置」（折叠后保留到第几行）时**漏掉了这一侧的行数预算**，`pick()` 取的是「所有行的最底部」= 内容总高度，于是 `overflows = natural > cutHeight + 8` 对任何消息都恒为假 —— 于是既不折、也不给按钮。凡走克隆测量这条路的消息全中（2026-10-13 真机计数：33 条走克隆的全部丢按钮，47 条降级到真实节点测量的仍正常，所以现象看起来时好时坏、像「随机失效」）。这个参数是 0.10.1 之前把带预算的 `cutHeightFor(body, budget)` 并入 `probeNatural()` 时丢掉的；降级路径 `cutHeightForBody()` 一直带着预算，两条路径因此长期不一致。
+  - 修：`probeNatural(body, budgetLines)` 接收本侧保留行数，`pick()` 只接受预算之内的行底部并取其中最大者（与 `cutHeightForBody` 同一判据）；一行都放不下时返回 0，由调用方用 `contentBudget` 兜底。
+  - 说明：此前两次尝试（撤 `padding-bottom` 重复计算、修克隆宽高三处失真）方向都不对 —— 它们修的是「量得准不准」，而病根在「拿量出来的数做什么比较」，所以怎么修都不见效。
+- **修：一行短消息被误判为「需要折叠」。** `overflows` 两侧不同量纲：左边 `natural` 是 `scrollHeight`（含上下内边距），右边 `cutHeight` 是按 `box-sizing` 换算过的限高值（`content-box` 下只到内容框），差了 `padding-top + padding-bottom`（实测 16px）——于是「一行文字、根本超不过 10 行预算」也会被判成溢出，白出一个按钮并裁掉 8px。现在比较前把内边距补回去（两侧同量纲）；降级路径也补齐 `padTop` / `padBottom` / `boxSizing` 字段。README 承诺的「短消息不折」由此才真正成立。
+- **测试（防回归）**：`test/probe-natural-browser.mjs` 原先只核对高度与宽度、不检查下刀位置，这个 bug 正是从它的眼皮底下溜过去的（当时 7/7 全绿）。现在补三条真实浏览器检查：下刀位置必须落在预算之内且非零、长文本 `overflows` 必须为真、短文本 `overflows` 必须为假 —— 专项 10/10。
+
 ## 0.10.1 — 2026-10-13
 
 - **修（严重）：「每轮显示耗时」整条数据链是断的，徽标永远不显示。** 三个 bug 叠加：① `scripts/build.mjs` 的 MODULES 注册表是**手写四行**，0.10.0 加 turn-timer.js 模块时只更新了模块清单、忘了同步注册表——模块打进了 client.js 却查无此键，`local['./src/turn-timer.js']` 为 undefined，store 创建不了（`--check` 比对不出来：产物与构建脚本是同步的，bug 在模板里）。注册表改为按 LOCAL_MODULES 自动生成，加模块只改一处。② `pickSessionId` 猜的三种 sessions 形状（`sessions.current` / `sessions.byId` / `sessions.list()`）在真实宿主里全不存在，改用宿主实证路径：DOM `[data-conversation-session]`（宿主自己的输入代码就这么拿当前会话）+ `sessions.list.getSnapshot().byId`。③ DOM 侧诊断对象写在 client-entry 传入的环境对象上，控制台读真 window 永远 null。诊断入口：控制台 `__DSH_BUBBLE_FOLD__.turnTimer()`（probe / dom / store 三段）。
