@@ -29,3 +29,8 @@ jobs:
 
       - name: 客户端入口与设置页注册契约
         run: node test/entry.test.mjs
+
+      # 把 docs/回归检查清单.md 里每一条防线变成断言（回环调用上面几个测试，
+      # 外加对源码的静态不变量检查）。--fast 跳过需要无头 Chrome 的浏览器专项。
+      - name: 老 bug 回归检查
+        run: node scripts/regression-check.mjs --fast

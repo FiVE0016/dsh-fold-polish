@@ -3801,11 +3801,62 @@
             return 0
           }
         }
+        /**
+         * 宿主「已经把右栏收起来了」的最后一道兜底。
+         *
+         * 0.9.5 修过一次「关闭右栏后主区不回弹」：当时靠的是宿主改动 frame 的 style
+         * 或 frame 上的收起属性这一个信号。2026-10-13 该 bug 复发 —— 宿主换一种收起
+         * 方式（只把面板内容卸掉 / 隐藏，不动 frame 的 grid 模板）时观察者收不到任何
+         * 通知，我们那条 `!important` 规则就一直占着第三列，主区停在半宽。
+         * 这里改用与结构无关的几何事实：右栏那一列里还有没有任何「真正渲染出来」的
+         * 后代。连续两次都为空才撤，避免瞬时渲染误判。
+         */
+        let idleChecks = 0
+        const rightPanelStillThere = () => {
+          const frame = frameOf()
+          const cols = frame?.children ? [...frame.children] : []
+          if (cols.length === 0) return true // 看不到结构就按「还在」处理，宁可不动
+          const third = cols[cols.length - 1]
+          if (!third || typeof third.querySelectorAll !== 'function') return true
+          if (third.hasAttribute?.('hidden') || third.getAttribute?.('aria-hidden') === 'true') return false
+          try {
+            const own = third.getClientRects?.()
+            if (own && own.length === 0) return false
+            let seen = 0
+            for (const node of third.querySelectorAll('*')) {
+              seen += 1
+              if (seen > 120) return true
+              const rects = node.getClientRects?.()
+              if (rects && rects.length > 0 && rects[0].width > 1 && rects[0].height > 1) return true
+            }
+          } catch { return true }
+          return false
+        }
+        let watchTimer = null
+        const stopWatch = () => {
+          if (watchTimer !== null) {
+            try { view.clearInterval?.(watchTimer) } catch { /* ignore */ }
+            watchTimer = null
+          }
+          idleChecks = 0
+        }
+        const startWatch = () => {
+          if (disposed || watchTimer !== null) return
+          if (typeof view.setInterval !== 'function') return
+          watchTimer = view.setInterval(() => {
+            if (disposed || forcedPx <= 0) { stopWatch(); return }
+            if (doc?.hidden === true) return
+            if (rightPanelStillThere()) { idleChecks = 0; return }
+            idleChecks += 1
+            if (idleChecks >= 2) clearOverride()
+          }, 1200)
+        }
         const clearOverride = () => {
           const tag = doc?.getElementById?.(RULE_ID)
           if (tag) tag.textContent = ''
           frameOf()?.removeAttribute?.(FRAME_MARK)
           forcedPx = 0
+          stopWatch()
         }
         /**
          * Force the right column to the chosen width.
@@ -3839,8 +3890,12 @@
           }
           const head = tracks.slice(0, tracks.length - 1).join(' ')
           frame.setAttribute(FRAME_MARK, '1')
-          tag.textContent = `[${FRAME_MARK}]{grid-template-columns:${head} ${Math.round(px)}px !important}`
+          // 选择器自带「收起即失效」：宿主给框架加上收起/全屏标记时 CSS 立刻不再匹配，
+          // 不依赖任何 JS 通知（这是老 bug 复发后补的纯 CSS 兜底）。
+          tag.textContent = `[${FRAME_MARK}]:not([data-rightbar-collapsed]):not([data-rightbar-fullscreen])`
+            + `{grid-template-columns:${head} ${Math.round(px)}px !important}`
           forcedPx = Math.round(px)
+          startWatch()
           return true
         }
         const applyRatio = (ratio) => {
@@ -3908,6 +3963,8 @@
         let wasShown = false
         const onFrameChange = () => {
           if (disposed) return
+          // 宿主可能已经把 AppFrame 换掉了；子节点观察者必须跟到新元素上。
+          observeFrameChildren()
           const frame = frameOf()
           const collapsed = frame?.hasAttribute?.('data-rightbar-collapsed') === true
           const fullscreen = frame?.hasAttribute?.('data-rightbar-fullscreen') === true
@@ -3932,21 +3989,58 @@
         // A drag re-renders the frame's inline grid template; a window resize changes
         // what the same ratio means in px. The store exposes no getter, so both are
         // read from the DOM.
+        /**
+         * 观察者必须盯住**整棵文档**、而不是激活时那一个 frame 元素：宿主重渲染会把
+         * AppFrame 整个换掉，绑在旧节点上的观察者从此再也听不到任何事 —— 0.9.5 修好的
+         * 「关闭右栏后不回弹」就是这样在 2026-10-13 复发的。回调里只做廉价过滤
+         * （读内联 grid 字符串，不触发布局），把插件自己每条消息的 style 写入噪声挡掉。
+         */
         let observer = null
-        try {
+        let childObserver = null
+        let childObserverFrame = null
+        const observeFrameChildren = () => {
+          if (disposed || typeof view.MutationObserver !== 'function') return
           const frame = frameOf()
-          if (frame && typeof view.MutationObserver === 'function') {
-            observer = new view.MutationObserver(() => {
-              onFrameChange()
+          if (!frame || childObserverFrame === frame) return
+          try { childObserver?.disconnect?.() } catch { /* ignore */ }
+          childObserverFrame = frame
+          try {
+            childObserver = new view.MutationObserver(() => { onFrameChange() })
+            // 只看直接子节点：右栏被卸载/替换时这里一定响；会话区内部的消息增删
+            // 不会冒泡到 frame 的直接子节点（关掉 subtree），噪声可控。
+            childObserver.observe(frame, { childList: true })
+          } catch {
+            childObserver = null
+            childObserverFrame = null
+          }
+        }
+        try {
+          const root = doc?.documentElement ?? doc?.body ?? null
+          if (root && typeof view.MutationObserver === 'function') {
+            observer = new view.MutationObserver((records) => {
+              let relevant = false
+              for (const record of records) {
+                const name = record.attributeName
+                if (name === 'style') {
+                  // 只有承载三列内联 grid 的元素才可能是框架。
+                  let gridOwner = false
+                  try { gridOwner = !!record.target?.style?.gridTemplateColumns } catch { gridOwner = false }
+                  if (!gridOwner) continue
+                  relevant = true
+                } else if (name === 'data-rightbar-collapsed' || name === 'data-rightbar-fullscreen') {
+                  relevant = true
+                }
+              }
+              if (relevant) onFrameChange()
             })
-            // `style` alone is not enough: a close may only flip the presentation
-            // attributes, and then nothing would ever release the forced column.
-            observer.observe(frame, {
+            observer.observe(root, {
               attributes: true,
+              subtree: true,
               attributeFilter: ['style', 'data-rightbar-collapsed', 'data-rightbar-fullscreen']
             })
           }
         } catch { observer = null }
+        observeFrameChildren()
         const onResize = () => {
           if (disposed) return
           view.setTimeout(() => {
@@ -3981,8 +4075,12 @@
           dispose() {
             disposed = true
             clearOverride()
+            stopWatch()
             observer?.disconnect()
             observer = null
+            try { childObserver?.disconnect?.() } catch { /* ignore */ }
+            childObserver = null
+            childObserverFrame = null
             for (const timer of timers) view.clearTimeout(timer)
             try { view.removeEventListener('resize', onResize) } catch { /* ignore */ }
           }

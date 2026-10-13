@@ -68,6 +68,7 @@ const runEntry = (options = {}) => {
     useEffect: () => {}
   }
   const observers = []
+  const intervals = []
   const win = {
     __ModuleLoader__: { load: (row) => { registration = row } },
     __DSH_BUBBLE_FOLD_MODULES__: {
@@ -86,6 +87,9 @@ const runEntry = (options = {}) => {
     // waits for the controller race ahead of its own creation.
     setTimeout: (fn) => { if (typeof fn === 'function') Promise.resolve().then(fn); return 0 },
     clearTimeout: () => {},
+    // 右栏几何自检用的低频定时器：测试里手动触发（fireIntervals），不引入真实等待。
+    setInterval: (fn) => { intervals.push(fn); return intervals.length },
+    clearInterval: (id) => { if (id > 0) intervals[id - 1] = null },
     MutationObserver: class {
       constructor(callback) {
         this.callback = callback
@@ -142,7 +146,10 @@ const runEntry = (options = {}) => {
     }
   }
   const emitMutations = (...records) => { queueMutations(records); flushMutations() }
-  return { plugin, win, fakeController, listeners, observers, queueMutations, flushMutations, emitMutations }
+  return {
+    plugin, win, fakeController, listeners, observers, queueMutations, flushMutations, emitMutations,
+    fireIntervals: () => { for (const fn of [...intervals]) if (typeof fn === 'function') fn() }
+  }
 }
 
 const FRAME_TRACKS = '280px minmax(400px, 1fr) minmax(0px, 720px)'
@@ -493,7 +500,14 @@ test('a drag is adopted, and our own apply is not mistaken for one', async () =>
   }
   plugin.apply(ctx)
   await tick()
-  assert.equal(observers.length, 1, '框架的样式变化被观察')
+  // 两个观察者、两种职责：一个盯整棵文档里的内联 grid（框架可能被宿主整个换掉，
+  // 绑在单个节点上会失灵），一个盯框架的直接子节点（右栏被卸载时靠它响应）。
+  const watchesStyle = observers.some((ob) => [...ob.targets.values()]
+    .some((cfg) => cfg.attributes === true && (cfg.attributeFilter ?? []).includes('style')))
+  const watchesChildren = observers.some((ob) => [...ob.targets.values()]
+    .some((cfg) => cfg.childList === true))
+  assert.ok(watchesStyle, '必须有一个观察者的范围覆盖内联 grid（style）的变化')
+  assert.ok(watchesChildren, '必须有一个观察者盯着框架的直接子节点')
 
   // Right after our own apply the host re-renders: that must NOT become the ratio.
   frame.style.gridTemplateColumns = '280px minmax(400px, 1fr) minmax(0px, 300px)'
@@ -552,6 +566,57 @@ test('closing the right panel releases the forced width, reopening restores it',
   emitMutations(attrMutation(frame), attrMutation(frame, 'data-rightbar-collapsed'))
   assert.match(rule.textContent, /720px/, '重新打开时恢复')
   assert.equal(frame.attrs['data-lf-frame'], '1')
+})
+
+test('the forced-width rule releases itself in pure CSS when the host marks the panel closed', async () => {
+  // 0.9.5 靠 JS 通知撤规则；2026-10-13 该 bug 复发说明通知可能根本收不到。
+  // 规则选择器现在自带 :not([data-rightbar-collapsed]) / :not([data-rightbar-fullscreen])：
+  // 宿主一打上标记，CSS 立刻不再匹配，不依赖任何 JS 事件。
+  const { document, created } = makeFrameDocument()
+  const { plugin } = runEntry({ userAgent: 'Mozilla/5.0 Chrome/152 Electron/44.0.0 Safari/537.36', document })
+  plugin.apply({
+    slots: { inject: (_name, callback) => { callback(); return () => {} }, register: () => () => {} },
+    get: (name) => (name === 'layout' ? { panels: { setRightbar: () => {}, setViewportWidth: () => {} } } : undefined)
+  })
+  await tick()
+  const rule = created.find((el) => el.id === 'dsh-bubble-fold-frame')
+  assert.match(rule.textContent, /:not\(\[data-rightbar-collapsed\]\)/, '规则必须自带「收起即失效」')
+  assert.match(rule.textContent, /:not\(\[data-rightbar-fullscreen\]\)/, '全屏同理')
+})
+
+test('a right panel whose content disappears releases the forced width', async () => {
+  // 复发场景（2026-10-13 用户报告）：宿主收起右栏时既不改 frame 的 grid 模板、
+  // 也不加 collapsed 属性，只把面板内容卸掉 —— 两个观察者都收不到通知，主区就
+  // 永远停在半宽。几何自检兜底：连续两次看不到渲染出来的内容就撤规则。
+  const { document, frame, created } = makeFrameDocument()
+  const makeColumn = (descendants) => ({
+    attrs: {},
+    hasAttribute(name) { return Object.prototype.hasOwnProperty.call(this.attrs, name) },
+    getAttribute(name) { return this.attrs[name] ?? null },
+    getClientRects: () => [{ width: 300, height: 800 }],
+    querySelectorAll: () => descendants
+  })
+  const content = [{ getClientRects: () => [{ width: 280, height: 700 }] }]
+  frame.children = [makeColumn([]), makeColumn([]), makeColumn(content)]
+
+  const { plugin, fireIntervals } = runEntry({ userAgent: 'Mozilla/5.0 Chrome/152 Electron/44.0.0 Safari/537.36', document })
+  plugin.apply({
+    slots: { inject: (_name, callback) => { callback(); return () => {} }, register: () => () => {} },
+    get: (name) => (name === 'layout' ? { panels: { setRightbar: () => {}, setViewportWidth: () => {} } } : undefined)
+  })
+  await tick()
+  const rule = created.find((el) => el.id === 'dsh-bubble-fold-frame')
+  assert.match(rule.textContent, /720px/, '启动时强制了设定宽度')
+
+  fireIntervals()
+  fireIntervals()
+  assert.match(rule.textContent, /720px/, '内容还在时自检不能误撤')
+
+  content.length = 0
+  fireIntervals()
+  assert.match(rule.textContent, /720px/, '只空一次属于瞬时状态，先不撤')
+  fireIntervals()
+  assert.equal(rule.textContent, '', '连续两次看不到内容 → 撤掉强制宽度，主区回弹')
 })
 
 test('a host without panels.setRightbar degrades instead of throwing', () => {
