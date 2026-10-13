@@ -1648,10 +1648,10 @@ export function start(win, React) {
       if (cut === 0) cut = pick(elementEnds(clone, origin, 0))
 
       // 自然高度：克隆没有被 max-height 夹，scrollHeight 就是真实内容高度。
-      // 但克隆的 padding-bottom 被我们清掉了（原 CSS 注释：内容会溢进 padding 盒，
-      // 不删的话会画出下一行的第一像素），所以要把真实节点的 padding-bottom 补回去，
-      // 否则量出的高度比真实值少一截（实测少 8px，约 1.2%）。
-      const natural = clone.scrollHeight + padBottom
+      // 不要再补 padding-bottom —— scrollHeight 的定义已含它（实测：清掉内联
+      // padding-bottom 后克隆的 computedStyle 仍是 8px、scrollHeight 654/38 与真值
+      // 完全一致）。补了就是重复计算，短文本会从 38 变 46。
+      const natural = clone.scrollHeight
       // 量不到自然高度同样不可信，回退
       if (!(natural > 0)) return null
       result = {
