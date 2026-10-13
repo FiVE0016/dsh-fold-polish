@@ -89,7 +89,8 @@ const CSS = `
      paint the first pixels of the following line. */
   max-height: var(--lf-clamp-height, 0px) !important;
   padding-bottom: 0 !important;
-  transition: max-height .18s ease !important;
+  /* 无 transition：根治后扫描不再抖动，transition 只会把残余变化拉成渐变，
+     看上去像「被慢慢吸下去」。高度变化只在真正该变的时候发生，瞬间到位更诚实。 */
 }
 :root[data-dsh-bubble-fold] [data-lf-clamped="1"][data-lf-open="1"] {
   max-height: none !important;
@@ -1487,7 +1488,13 @@ export function start(win, React) {
 
   function labelFor(record) {
     const { body, kind } = record
-    const lines = F.hiddenLineLabel(body.scrollHeight, body.getBoundingClientRect().height, lineHeightOf(body))
+    // 自然高度必须从克隆量：body 正被 max-height 夹着，它的 scrollHeight 是裁剪值，
+    // 直接拿来当「内容总高」会把「还有 N 行」算得严重偏低。
+    const probe = probeNatural(body)
+    const contentPx = probe ? probe.natural : body.scrollHeight
+    const visiblePx = body.getBoundingClientRect().height
+    const lineHeight = probe ? probe.lineHeight : lineHeightOf(body)
+    const lines = F.hiddenLineLabel(contentPx, visiblePx, lineHeight)
     const name = kind === F.SIDE_USER ? '展开我的输入' : '展开全文'
     return lines ? `${name} · ${lines}` : name
   }
@@ -1506,7 +1513,177 @@ export function start(win, React) {
    * the conversion, because line boxes are measured from the border box while the
    * budget counts content.
    */
-  function cutHeightFor(body, budget) {
+
+  /**
+   * 屏幕外测量容器：克隆节点在这里量几何，真实节点全程带着 max-height 不动。
+   *
+   * 为什么必须这么做：`max-height` 会同时影响 `scrollHeight` 与
+   * `getBoundingClientRect()` / `Range.getClientRects()`——被夹住的盒子量出来的
+   * 是裁剪后的值。老代码为了拿到真实高度，先在真实节点上
+   * `removeAttr('data-lf-clamped')` 量一次、再夹回去；而扫描是每秒跑的，于是
+   * 「展开→夹回」每秒发生一次，对话总高度跟着抖，读者停在历史位置时会被挤到
+   * 底部（症状：往上翻被强制拉回最新一条）。
+   *
+   * 克隆到屏幕外容器量，真实节点一秒都不被解除限制，布局零扰动。
+   * 容器复用同一个实例，避免每次扫描都创建/销毁 DOM。
+   */
+  let measureHost = null
+
+  function measureHostOf() {
+    if (measureHost && measureHost.isConnected) return measureHost
+    // 必须挂在 document 上：脱离文档的节点量不到几何。
+    const host = doc.createElement('div')
+    host.setAttribute('data-lf-measure-host', '')
+    host.style.position = 'fixed'
+    host.style.left = '-99999px'
+    host.style.top = '0'
+    host.style.width = '0'
+    host.style.height = '0'
+    host.style.overflow = 'visible'
+    host.style.visibility = 'hidden'
+    host.style.pointerEvents = 'none'
+    host.style.zIndex = '-1'
+    // 不参与任何祖先布局，也不该被读到
+    host.style.contain = 'strict'
+    ;(doc.body ?? doc.documentElement).appendChild(host)
+    measureHost = host
+    return host
+  }
+
+  /**
+   * 量一个 body 的自然（未裁剪）高度与内容结束位置，不扰动真实节点。
+   * @param body - 真实节点（可能正被 max-height 夹着）
+   * @returns { natural, cutHeight, lineHeight, padTop, padBottom, boxSizing } 或 null
+   */
+  function probeNatural(body) {
+    if (typeof body.cloneNode !== 'function') return null
+    const host = measureHostOf()
+    let clone
+    try {
+      // deep clone：内容、样式类、内联样式都带过去；脚本不执行（cloneNode 不跑 JS）
+      clone = body.cloneNode(true)
+    } catch {
+      return null
+    }
+    // 克隆必须解除一切钳制，否则量到的还是裁剪值
+    clone.removeAttribute('data-lf-clamped')
+    clone.removeAttribute('data-lf-open')
+    clone.style.removeProperty('max-height')
+    clone.style.removeProperty('padding-bottom')
+    clone.style.removeProperty('height')
+    clone.style.removeProperty('--lf-clamp-height')
+    // 宽度必须与真实节点一致，否则换行位置不同、高度就没有意义
+    const realBox = body.getBoundingClientRect()
+    const realStyle = computedStyleOf(body)
+    clone.style.width = realBox.width > 0 ? `${realBox.width}px` : (realStyle.width || 'auto')
+    clone.style.boxSizing = realStyle.boxSizing || 'content-box'
+    clone.style.margin = '0'
+    clone.style.position = 'static'
+    clone.style.visibility = 'hidden'
+    host.appendChild(clone)
+
+    let result = null
+    try {
+      const style = computedStyleOf(clone)
+      const padTop = Number.parseFloat(style.paddingTop) || 0
+      const padBottom = Number.parseFloat(style.paddingBottom) || 0
+      const lineHeight = lineHeightOf(clone)
+      const box = clone.getBoundingClientRect()
+      // 克隆必须真的被布局过：宽度为 0 说明当前 DOM 实现不产出几何
+      // （jsdom / 测试替身），此时克隆上的任何数值都不可信，交给调用方回退。
+      if (!(box.width > 0) || !(box.height > 0)) return null
+      const origin = box.top + (clone.clientTop || 0) + padTop
+
+      // 内容结束位置：优先 Range（按行/按文本片段，能在行边界处下刀），
+      // 退回按子元素底边——与 cutHeightFor 同一套判据，只是在克隆上跑。
+      const pick = (ends) => {
+        let cut = 0
+        for (const end of ends) {
+          if (end <= 0) continue
+          if (cut === 0 || end > cut) cut = end
+        }
+        return cut
+      }
+      let cut = 0
+      if (typeof doc.createRange === 'function') {
+        try {
+          const range = doc.createRange()
+          range.selectNodeContents(clone)
+          const rects = range.getClientRects()
+          const ends = []
+          for (let index = 0; index < rects.length; index += 1) ends.push(rects[index].bottom - origin)
+          cut = pick(ends)
+        } catch {
+          cut = 0
+        }
+      }
+      if (cut === 0) cut = pick(elementEnds(clone, origin, 0))
+
+      // 自然高度：克隆没有被 max-height 夹，scrollHeight 就是真实内容高度
+      const natural = clone.scrollHeight
+      // 量不到自然高度同样不可信，回退
+      if (!(natural > 0)) return null
+      result = {
+        natural: natural > 0 ? natural : Math.round(box.height),
+        cutHeight: cut > 0 ? Math.round(style.boxSizing === 'border-box' ? cut + padTop + padBottom : cut) : 0,
+        lineHeight,
+        padTop,
+        padBottom,
+        boxSizing: style.boxSizing,
+        // 附件总高：克隆里的 img 等同样有几何，量法与 attachmentHeightIn 一致
+        mediaHeight: mediaHeightIn(clone)
+      }
+    } finally {
+      // 无论成败都必须移除克隆：留在 DOM 里会一直占着测量容器
+      if (clone.parentNode) clone.parentNode.removeChild(clone)
+    }
+    return result
+  }
+
+  /**
+   * 克隆测量的降级路径：直接量真实节点，因此必须临时解除钳制再夹回。
+   *
+   * 只在克隆量不到几何时才会被调用——真实浏览器里 probeNatural 一定成功，
+   * 所以这条路不会把每秒抖动带回来。它的存在是为了让「不做布局的 DOM 实现」
+   * （jsdom、测试替身）依然能夹断、依然能算出「还有 N 行」。
+   */
+  function probeNaturalFallback(body, limits, lines) {
+    if (typeof body.getBoundingClientRect !== 'function') return null
+    const lineHeight = lineHeightOf(body)
+    const contentBudget = F.clampHeightFor(lines, lineHeight) + mediaHeightIn(body)
+    // 已经解除钳制的节点不需要「先解除再还原」：直接量，零写入。
+    // 只有正被夹住的节点才必须临时解除——这时写入是必要的，量完立刻还原，
+    // 并且只在值真的不同时才写（setAttr/removeAttr 自带同值短路）。
+    const wasClamped = body.getAttribute('data-lf-clamped') === '1'
+    const wasOpen = body.getAttribute('data-lf-open')
+    if (wasClamped) removeAttr(body, 'data-lf-clamped')
+    if (wasOpen !== null) removeAttr(body, 'data-lf-open')
+    let result = null
+    try {
+      const natural = body.scrollHeight
+      if (natural > 0) {
+        const cut = cutHeightForBody(body, contentBudget)
+        result = {
+          natural,
+          cutHeight: cut > 0 ? cut : contentBudget,
+          lineHeight,
+          mediaHeight: mediaHeightIn(body),
+          fallback: true
+        }
+      }
+    } finally {
+      // 还原：只在值与当前不同时才写，避免同值写入喂给 MutationObserver
+      if (wasClamped && body.getAttribute('data-lf-clamped') !== '1') setAttr(body, 'data-lf-clamped', '1')
+      if (wasOpen !== null && body.getAttribute('data-lf-open') !== wasOpen) setAttr(body, 'data-lf-open', wasOpen)
+    }
+    return result
+  }
+
+  /**
+   * 在（已解除钳制的）真实节点上算下刀高度：按行边界优先，退回子元素底边。
+   * 与 probeNatural 内的判据一致，只是跑在真实节点上。
+   */
+  function cutHeightForBody(body, budget) {
     const box = body.getBoundingClientRect()
     const style = computedStyleOf(body)
     const padTop = Number.parseFloat(style.paddingTop) || 0
@@ -1535,8 +1712,14 @@ export function start(win, React) {
       }
     }
     if (cut === 0) cut = pick(elementEnds(body, origin, 0))
-    if (cut === 0) return budget
+    if (cut === 0) return 0
     return Math.round(style.boxSizing === 'border-box' ? cut + padTop + padBottom : cut)
+  }
+
+  /** 屏幕外容器随插件一起销毁。 */
+  function disposeMeasureHost() {
+    if (measureHost && measureHost.parentNode) measureHost.parentNode.removeChild(measureHost)
+    measureHost = null
   }
 
   /** Box ends of nested element children, for the no-Range fallback. */
@@ -1562,38 +1745,81 @@ export function start(win, React) {
    * skipped unless it is tall enough to be a picture, because chat clients often
    * render emoji as inline images.
    */
-  function attachmentHeightIn(body) {
-    if (typeof body.querySelectorAll !== 'function') return 0
+  /**
+   * 节点内附件的渲染高度总和。对真实节点和屏幕外克隆都适用——判据只看几何，
+   * 所以克隆里的 img 量出来的一样有效。
+   */
+  function mediaHeightIn(node) {
+    if (typeof node.querySelectorAll !== 'function') return 0
     let total = 0
-    for (const node of body.querySelectorAll('[data-message-attachments], [data-attachment], img, video, audio, picture, figure')) {
-      const rect = node.getBoundingClientRect?.()
+    for (const item of node.querySelectorAll('[data-message-attachments], [data-attachment], img, video, audio, picture, figure')) {
+      const rect = item.getBoundingClientRect?.()
       if (!rect || !(rect.height > 0)) continue
-      const marked = node.hasAttribute('data-message-attachments') || node.hasAttribute('data-attachment')
+      const marked = item.hasAttribute('data-message-attachments') || item.hasAttribute('data-attachment')
       if (!marked && rect.height < MEDIA_MIN_PX) continue
       total += rect.height
     }
     return Math.round(total)
   }
 
-  function measureAndClamp(anchor, side, record) {
+  /** 真实 body 的附件高度（兼容旧调用点）。 */
+  function attachmentHeightIn(body) {
+    return mediaHeightIn(body)
+  }
+
+  /**
+   * 纯内容指纹：不碰布局、不写 DOM。
+   * 行数预算与 extraPx 来自设置，结构与文本量来自 DOM 只读属性，
+   * 四者任一变化才可能让几何变化——所以它足以替代旧的 scrollHeight 指纹，
+   * 且不需要为算指纹而测量。
+   */
+  function contentSignature(body, lines, extraPx, tailHidden) {
+    let nodes = 0
+    let chars = 0
+    try {
+      const walk = (node) => {
+        for (const child of node.children ?? []) {
+          nodes += 1
+          walk(child)
+        }
+      }
+      walk(body)
+      chars = (body.textContent ?? '').length
+    } catch {
+      // 读不到就退化成只有设置的指纹：最坏情况是每轮都重测，不会错。
+      nodes = -1
+      chars = -1
+    }
+    return `${nodes}|${chars}|${lines}|${extraPx}|${tailHidden}`
+  }
+
+  function measureAndClamp(anchor, side, record, probed) {
     const { body } = record
-    const lineHeight = lineHeightOf(body)
     const limits = F.settingsForSide(settings, side)
     const lines = settings.collapseAll ? settings.collapsedLines : limits.lines
+
+    // 全部几何都在屏幕外克隆上量：真实节点全程带着 max-height 不动，
+    // 因此扫描再也不产生「解除→夹回」的布局抖动。
+    let probe = probed ?? probeNatural(body)
+    if (probe === null) {
+      // 克隆量不到几何（当前 DOM 实现不产出布局，例如测试替身）：
+      // 回退到直接在真实节点上量。这条路径在真实浏览器里不会走到，
+      // 所以不会把抖动带回来；但不做布局的环境必须还能夹断。
+      probe = probeNaturalFallback(body, limits, lines)
+    }
+    if (probe === null) return
+    const lineHeight = probe.lineHeight
     // An attachment inside the body keeps its FULL height — the line budget is for
     // text, and a picture must never be cut in half. Whatever the attachment
     // occupies is added on top of the budget, so image + 很长的正文 still folds:
     // the picture stays whole and only the text is clipped. The host usually
     // renders attachments in their own row OUTSIDE the bubble, in which case this
     // is zero and nothing changes.
-    const contentBudget = F.clampHeightFor(lines, lineHeight) + attachmentHeightIn(body)
+    const contentBudget = F.clampHeightFor(lines, lineHeight) + probe.mediaHeight
     const gap = F.gapFor(settings.extraPx)
 
-    // Measurement must happen while the body is NOT clamped, otherwise
-    // scrollHeight reflects the constrained box instead of the real content.
-    removeAttr(body, 'data-lf-clamped')
-    const natural = body.scrollHeight
-    const cutHeight = cutHeightFor(body, contentBudget)
+    const natural = probe.natural
+    const cutHeight = probe.cutHeight > 0 ? probe.cutHeight : contentBudget
     const overflows = natural > cutHeight + 8
 
     if (overflows) {
@@ -1939,7 +2165,11 @@ export function start(win, React) {
         record = wrap(anchor, side, body)
       }
       // Skip the measurement pass for settled rows whose geometry has not moved.
-      const signature = `${record.body.scrollHeight}|${lines}|${settings.extraPx}|${record.tail.hidden ? 0 : 1}`
+      // 指纹必须**不测量**：任何测量在克隆不可用的环境里都会退化成
+      // 「解除 max-height → 量 → 还原」，那是每轮白写 4 个属性的自我喂食。
+      // 内容指纹（结构 + 文本量 + 生效的行数预算）变了，几何才可能变；
+      // 没变就一跳而过，连量都不量。
+      const signature = contentSignature(record.body, lines, settings.extraPx, record.tail.hidden ? 0 : 1)
       if (measured.get(anchor) === signature) continue
       measured.set(anchor, signature)
       measureAndClamp(anchor, side, record)
@@ -2701,6 +2931,7 @@ export function start(win, React) {
       turnTimerOff = null
       for (const chip of doc.querySelectorAll('[data-lf-turn-timer]')) chip.remove()
       clipAll()
+      disposeMeasureHost()
       panel?.remove()
       scrim?.remove()
       panel = null
