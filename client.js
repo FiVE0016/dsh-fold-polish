@@ -1706,17 +1706,20 @@
         // 必须挂在 document 上：脱离文档的节点量不到几何。
         const host = doc.createElement('div')
         host.setAttribute('data-lf-measure-host', '')
+        // 定位到屏幕外：不影响任何可见布局，也滚不到那儿。
         host.style.position = 'fixed'
         host.style.left = '-99999px'
         host.style.top = '0'
-        host.style.width = '0'
-        host.style.height = '0'
+        // 容器必须给足宽度：宽 0 会让克隆里的文本无限换行，量出来的高度完全失真。
+        // 取视口宽度的上限即可——克隆自身还会被显式设成真实节点的宽度。
+        host.style.width = '100vw'
+        host.style.height = 'auto'
         host.style.overflow = 'visible'
         host.style.visibility = 'hidden'
         host.style.pointerEvents = 'none'
         host.style.zIndex = '-1'
-        // 不参与任何祖先布局，也不该被读到
-        host.style.contain = 'strict'
+        // 不能加 contain —— size containment 会把克隆当成空元素（尺寸算 0），
+        // 量出来全是 0，overflows 恒为 false，折叠整体失效。
         ;(doc.body ?? doc.documentElement).appendChild(host)
         measureHost = host
         return host
@@ -1737,18 +1740,43 @@
         } catch {
           return null
         }
-        // 克隆必须解除一切钳制，否则量到的还是裁剪值
+        // 克隆必须解除一切钳制，否则量到的还是裁剪值。
+        // cloneNode 会把 class 一起带过来，而 max-height 写在 CSS class 规则里
+        // （:root[data-dsh-bubble-fold] [data-lf-clamped="1"]）而不是内联样式 ——
+        // removeProperty 清不掉 class 规则，克隆会一直带着 88px 的 max-height，
+        // 量出来的仍是裁剪值（诊断实测 offsetHeight 恒 96、scrollHeight 646 vs 真值 654）。
+        // 所以必须把钳制 class 摘掉，内联兜底同时保留。
         clone.removeAttribute('data-lf-clamped')
         clone.removeAttribute('data-lf-open')
+        try {
+          for (const cls of [...clone.classList]) {
+            if (cls.startsWith('lf-')) clone.classList.remove(cls)
+          }
+        } catch { /* classList 不可用时靠下面的内联兜底 */ }
+        // 解除一切可能限制高度的内联样式，否则量到的仍是裁剪值
         clone.style.removeProperty('max-height')
-        clone.style.removeProperty('padding-bottom')
+        clone.style.removeProperty('min-height')
         clone.style.removeProperty('height')
+        clone.style.removeProperty('padding-bottom')
+        clone.style.removeProperty('overflow')
+        clone.style.removeProperty('contain')
         clone.style.removeProperty('--lf-clamp-height')
-        // 宽度必须与真实节点一致，否则换行位置不同、高度就没有意义
-        const realBox = body.getBoundingClientRect()
+        // 宽度必须与真实节点一致，否则换行位置不同、高度就没有意义。
+        // 必须用 computedStyle.width——getBoundingClientRect().width 是边框盒宽度，
+        // 而克隆用 content-box，直接拿边框盒宽度会少减 padding+border，
+        // 克隆更宽、换行更少、量出的高度偏小（实测差 30px/4.6%）。
         const realStyle = computedStyleOf(body)
-        clone.style.width = realBox.width > 0 ? `${realBox.width}px` : (realStyle.width || 'auto')
+        const realBox = body.getBoundingClientRect()
+        const styleWidth = Number.parseFloat(realStyle.width)
+        const width = Number.isFinite(styleWidth) && styleWidth > 0
+          ? styleWidth
+          : (realBox.width > 0 ? realBox.width : Number.parseFloat(realStyle.width) || 0)
+        clone.style.width = width > 0 ? `${width}px` : (realStyle.width || 'auto')
         clone.style.boxSizing = realStyle.boxSizing || 'content-box'
+        // padding 一并搬过去：content-box 下 padding 不计入 width，但会影响换行
+        clone.style.paddingLeft = realStyle.paddingLeft
+        clone.style.paddingRight = realStyle.paddingRight
+        clone.style.paddingTop = realStyle.paddingTop
         clone.style.margin = '0'
         clone.style.position = 'static'
         clone.style.visibility = 'hidden'
@@ -1791,8 +1819,11 @@
           }
           if (cut === 0) cut = pick(elementEnds(clone, origin, 0))
 
-          // 自然高度：克隆没有被 max-height 夹，scrollHeight 就是真实内容高度
-          const natural = clone.scrollHeight
+          // 自然高度：克隆没有被 max-height 夹，scrollHeight 就是真实内容高度。
+          // 但克隆的 padding-bottom 被我们清掉了（原 CSS 注释：内容会溢进 padding 盒，
+          // 不删的话会画出下一行的第一像素），所以要把真实节点的 padding-bottom 补回去，
+          // 否则量出的高度比真实值少一截（实测少 8px，约 1.2%）。
+          const natural = clone.scrollHeight + padBottom
           // 量不到自然高度同样不可信，回退
           if (!(natural > 0)) return null
           result = {
