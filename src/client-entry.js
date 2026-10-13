@@ -22,17 +22,43 @@ window.__ModuleLoader__.load({
   id: 'dsh-fold-polish',
   factory: (require) => {
     const React = require('react')
-    // The host's icon set may be absent in a bare test host; fall back to no
-    // icon (the guide entry still renders, just without a glyph) rather than
-    // throwing on a missing package.
-    const primitives = require('@deepseek-ai/dsh-client-ui-primitives') ?? {}
-    const IconSearchOutline16 = primitives.IconSearchOutline16 ?? null
     const local = window.__DSH_BUBBLE_FOLD_MODULES__ ?? {}
     const { start } = local['./src/browser.js']
     const fold = local['./src/fold.js']
     const turnTimer = local['./src/turn-timer.js']
     const { createPanel } = local['./src/settings-panel.js']
     const { createFindPanel } = local['./src/find-panel.js']
+
+    /**
+     * 放大镜图标（自绘 SVG，不依赖外部包）。
+     * 与 dsh-model-picker 的 WhaleIcon 同一模式：viewBox 0 0 16 16，
+     * fill="currentColor" 继承文字颜色，width/height 由 size 控制。
+     */
+    function SearchIcon({ size = 16, className }) {
+      return React.createElement('svg', {
+        viewBox: '0 0 16 16',
+        width: size,
+        height: size,
+        className,
+        fill: 'currentColor',
+        xmlns: 'http://www.w3.org/2000/svg'
+      },
+        // 镜筒（圆环）
+        React.createElement('path', {
+          d: 'M11.5 7a4.5 4.5 0 1 1-9 0 4.5 4.5 0 0 1 9 0z',
+          fill: 'none',
+          stroke: 'currentColor',
+          strokeWidth: '1.5'
+        }),
+        // 镜柄
+        React.createElement('path', {
+          d: 'M11 11l3.5 3.5',
+          stroke: 'currentColor',
+          strokeWidth: '1.5',
+          strokeLinecap: 'round'
+        })
+      )
+    }
 
     /** The find tab's identity in the right sidebar: one id for all three parts. */
     const FIND_TAB_ID = 'bubble-fold-find'
@@ -640,7 +666,7 @@ window.__ModuleLoader__.load({
                 order: 20,
                 title: () => '查找',
                 description: () => '搜索本会话（含折叠内容）',
-                ...(IconSearchOutline16 ? { icon: IconSearchOutline16 } : {})
+                ...(typeof SearchIcon === 'function' ? { icon: SearchIcon } : {})
               }]
             })
             findPanelOff = slots.inject('sidebar.right.pane.tab', () => slots.register({
