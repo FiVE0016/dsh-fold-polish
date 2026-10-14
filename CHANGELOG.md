@@ -1,5 +1,12 @@
 # 更新记录
 
+## 0.10.4 — 向上滚动被拉回最底下（scroll anchoring 补偿）
+
+- **修：读者向上滚、刚离开底部一点，页面被拽回最底下（偶发，只在下方有长消息时）**。真根因是**浏览器钳位**：折叠扫描的 `isNearViewport` 窗口是「上下各一屏」，读者刚离开底部时其下方的消息仍会被折叠 → 滚动容器总高度变矮 → `scrollTop + clientHeight > scrollHeight` → 浏览器把位置钳到新的 floor。宿主 `use-scroll-follow` 的贴底阈值只有 1px（离开即释放），所以「宿主主动拉底」不是主因。
+  - 修（scroll anchoring）：`scan()` 改为 `captureScrollAnchor() → scanInner() → finally restoreScrollAnchor()`；仅当「位置被钳到新 floor、新 floor 低于原位、读者原本不在底部 2px 内」三个条件同时成立时恢复原位。读者贴底不碰、宿主自己滚的中间位置不碰，不会和宿主动画打架。
+  - 计数随 `stats()` 导出：`scrollFix: { runs, adjusted, pinnedSkipped, lastDelta }`，再出问题跑 `__DSH_FOLD_POLISH__.stats().scrollFix` 看补偿有没有干活。
+  - 回归检查 29/29。
+
 ## 0.10.3 — 放大镜图标（自绘 SVG）
 
 - **右栏「查找」tab 指南页菜单加图标** — 自绘 `SearchIcon` SVG 组件（镜筒圆环 + 镜柄，viewBox 0 0 16 16，fill="currentColor"），与 dsh-model-picker 的 `WhaleIcon` 同一模式。原方案依赖 `@deepseek-ai/dsh-client-ui-primitives` 的 `IconSearchOutline16`，但宿主运行时 `require()` 返回空对象，图标不显示；改为自绘后不依赖外部包，稳定可用。回归检查 29/29 通过。

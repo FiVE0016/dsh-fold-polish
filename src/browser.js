@@ -718,7 +718,9 @@ export function start(win, React) {
     measured: 0,
     // 2026-10-13 排查「助手回复不折叠」的探针计数器，随 stats() 导出
     probe: { cloneOk: 0, cloneNull: 0, cloneNullWhy: {}, fallback: 0, naturalSamples: [] },
-    side: { assistantSeen: 0, latestTurn: 0, limitsOff: 0, skipAncestor: 0, streaming: 0, noBody: 0, offscreen: 0, wrapped: 0, measured: 0, userSeen: 0, userLatest: 0, userSkip: 0, userNoBody: 0, userOffscreen: 0, userWrapped: 0, userMeasured: 0 }
+    side: { assistantSeen: 0, latestTurn: 0, limitsOff: 0, skipAncestor: 0, streaming: 0, noBody: 0, offscreen: 0, wrapped: 0, measured: 0, userSeen: 0, userLatest: 0, userSkip: 0, userNoBody: 0, userOffscreen: 0, userWrapped: 0, userMeasured: 0 },
+    // 「向上滚被拉回最底下」修复的补偿计数（随 stats() 导出）
+    scrollFix: { runs: 0, adjusted: 0, pinnedSkipped: 0, lastDelta: 0 }
   }
   /** card element -> the drag handle injected into it */
   const composerHandles = new Map()
@@ -2192,8 +2194,46 @@ export function start(win, React) {
   }
 
   // -------------------------------------------------------------------- scan
+  // ---- 滚动位置补偿（「向上滚被拉回最底下」的病根修复）----
+  // 折叠/展开会改变对话区总高度。变化发生在读者视口**下方**（读者刚离开底部
+  // 一点点）时，浏览器会把 scrollTop 钳到新的 floor——这就是「向上拉动页面
+  // 自动被拉回到最底下」：每趟 scan 折掉底部附近的消息，人就被钳回底部。
+  // 宿主的贴底跟随阈值只有 1px（离开即释放 follow），所以症状主因是钳位。
+  // 修法：每趟 scan 前后取滚动位置，仅当「位置被钳到了新 floor 且新 floor
+  // 低于原位」时恢复原位；读者本来贴底不碰；宿主自己滚动的中间位置不碰。
+  const scrollRootOf = () => doc.querySelector('[data-conversation-scroll]') ?? doc.body
+  let scrollAnchor = null
+
+  function captureScrollAnchor() {
+    const root = scrollRootOf()
+    const top = root.scrollTop
+    const floor = Math.max(0, root.scrollHeight - root.clientHeight)
+    scrollAnchor = { root, top, pinned: floor - top <= 2 }
+  }
+
+  function restoreScrollAnchor() {
+    const saved = scrollAnchor
+    scrollAnchor = null
+    if (saved === null) return
+    const { root, top, pinned } = saved
+    stats.scrollFix.runs += 1
+    if (pinned) { stats.scrollFix.pinnedSkipped += 1; return }
+    const newFloor = Math.max(0, root.scrollHeight - root.clientHeight)
+    // 被钳到（新）floor 且新 floor 低于原位置 → 恢复原位。
+    if (root.scrollTop >= newFloor && newFloor < top) {
+      root.scrollTop = top
+      stats.scrollFix.adjusted += 1
+      stats.scrollFix.lastDelta = top - newFloor
+    }
+  }
+
   function scan() {
     if (disposed) return
+    captureScrollAnchor()
+    try { scanInner() } finally { restoreScrollAnchor() }
+  }
+
+  function scanInner() {
     ensureStyles()
     applyRootFlag()
     stats.scans += 1
