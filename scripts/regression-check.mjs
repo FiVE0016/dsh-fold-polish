@@ -94,6 +94,23 @@ section('折叠测量（2026-10-13：下刀位置丢掉预算 → 胶囊键消�
   }
 }
 
+// ---------------------------------------------------------------- 滚动锚点
+section('向上滚不被拉回底部（0.10.4 修 → 0.10.5 重做）')
+{
+  check('不贴底时视口下方一屏不进折叠窗口（源头消除钳位拉底）',
+    /function isNearViewport\(element, pinned\)/.test(browser) &&
+    /if \(pinned && rect\.top < height \* 2\) return true/.test(browser),
+    '缺了它，读者脚下变矮 → scrollTop 被钳到新 floor → 被拽回底部')
+  check('scan 把贴底状态传给折叠窗口',
+    /isNearViewport\(anchor, scrollAnchor\?\.pinned\)/.test(browser))
+  check('锚点补偿存在（上方折叠保持视口不动）',
+    /function pickAnchorEl\(\)/.test(browser) && /anchorAdjusted/.test(browser))
+  check('restore 优先锚点补偿、数值兜底只计数不硬写',
+    /saved\.anchorEl && saved\.anchorEl\.isConnected/.test(browser) &&
+    /clampedNoAnchor/.test(browser),
+    '硬写超出新 floor 的 scrollTop 会被浏览器再次钳回底部')
+}
+
 // ---------------------------------------------------------------- 跳过判定
 section('消息行跳过判定（2026-10-13：宿主把回复包进过程容器 → 回复被整体跳过）')
 {

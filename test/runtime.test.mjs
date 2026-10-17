@@ -1590,6 +1590,47 @@ console.log('performance guards')
   })
 }
 
+console.log('scroll anchor: 向上滚不被拉回底部（0.10.5）')
+{
+  // 病根：读者离开底部后，视口下方的消息若被折叠，文档变矮、浏览器把
+  // scrollTop 钳到新 floor——读者被拽回底部（0.10.4 的数值恢复对这种情况
+  // 几何上无解）。修复：不贴底时不折视口下方一屏；贴底时照常折，窗口上限
+  // 仍是一屏。已折叠的消息在读者离开底部后保持原样，绝不跳动。
+  const fixture = buildFixture()
+  fixture.scroll.clientHeight = 800
+  fixture.scroll.scrollHeight = 2000
+  const onscreen = fixture.user({}, 600)
+  const below = fixture.user({ 'data-chat-anchor-key': 'user:below' }, 600)
+  const far = fixture.user({ 'data-chat-anchor-key': 'user:far' }, 600)
+  below.anchor.rectTop = 1200 // 视口下方一屏内（800 ≤ top < 1600）
+  far.anchor.rectTop = 2000 // 视口下方超过一屏
+
+  // 读者离开底部（floor = 2000 - 800 = 1200，离开 800px）→ 非贴底
+  fixture.scroll.scrolledTo = 400
+  const { controller } = await boot(fixture)
+
+  test('读者不贴底：视口下方的消息不折叠（文档不会在脚下变矮）', () => {
+    assert.equal(onscreen.bubble.getAttribute('data-lf-clamped'), '1', '视口内照常折叠')
+    assert.equal(below.bubble.getAttribute('data-lf-clamped'), null)
+    assert.equal(below.bubble.parentElement?.getAttribute('data-lf-body') ?? null, null, '连包都不包')
+  })
+  test('读者不贴底：下方超过一屏的消息也不折叠', () => {
+    assert.equal(far.bubble.getAttribute('data-lf-clamped'), null)
+  })
+  test('读者滚回贴底：下方一屏内的消息恢复折叠', () => {
+    fixture.scroll.scrolledTo = 1200 // floor - top = 0 → 贴底
+    controller.rescan()
+    assert.equal(below.bubble.getAttribute('data-lf-clamped'), '1')
+    assert.equal(far.bubble.getAttribute('data-lf-clamped'), null, '远处仍不折')
+  })
+  test('已折叠的消息在读者再离开底部后保持原样（不展开、不跳动）', () => {
+    fixture.scroll.scrolledTo = 400
+    controller.rescan()
+    assert.equal(below.bubble.getAttribute('data-lf-clamped'), '1', '保持折叠')
+    assert.equal(onscreen.bubble.getAttribute('data-lf-clamped'), '1')
+  })
+}
+
 console.log('composer resize')
 {
   // The host caps the composer at --dsh-composer-text-max-height on the seat and

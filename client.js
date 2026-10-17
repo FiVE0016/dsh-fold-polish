@@ -892,7 +892,7 @@
         probe: { cloneOk: 0, cloneNull: 0, cloneNullWhy: {}, fallback: 0, naturalSamples: [] },
         side: { assistantSeen: 0, latestTurn: 0, limitsOff: 0, skipAncestor: 0, streaming: 0, noBody: 0, offscreen: 0, wrapped: 0, measured: 0, userSeen: 0, userLatest: 0, userSkip: 0, userNoBody: 0, userOffscreen: 0, userWrapped: 0, userMeasured: 0 },
         // 「向上滚被拉回最底下」修复的补偿计数（随 stats() 导出）
-        scrollFix: { runs: 0, adjusted: 0, pinnedSkipped: 0, lastDelta: 0 }
+        scrollFix: { runs: 0, pinnedSkipped: 0, anchorAdjusted: 0, clampedNoAnchor: 0, lastDelta: 0 }
       }
       /** card element -> the drag handle injected into it */
       const composerHandles = new Map()
@@ -2122,10 +2122,16 @@
        * clamp pass and the work-step rows are limited to what is actually on screen
        * (plus a screen of margin, so scrolling never reveals an unfitted message).
        */
-      function isNearViewport(element) {
+      function isNearViewport(element, pinned) {
         const rect = element.getBoundingClientRect()
         const height = win.innerHeight || 800
-        return rect.bottom > -height && rect.top < height * 2
+        // 视口内与视口上方一屏：读者正在看或刚滚过去的内容，任何情况下都测量。
+        if (rect.bottom > -height && rect.top < height) return true
+        // 视口下方一屏：只有读者贴底时才折叠。读者离开底部后，折叠下方内容会把
+        // 文档变矮、浏览器把 scrollTop 钳到新 floor——「向上滚被拉回最底下」的病根。
+        // 不贴底时放过它们，等它们滚进上方窗口再折（渐进折叠）。
+        if (pinned && rect.top < height * 2) return true
+        return false
       }
 
       // ---------------------------------------------------------------- turn ids
@@ -2366,21 +2372,51 @@
       }
 
       // -------------------------------------------------------------------- scan
-      // ---- 滚动位置补偿（「向上滚被拉回最底下」的病根修复）----
-      // 折叠/展开会改变对话区总高度。变化发生在读者视口**下方**（读者刚离开底部
-      // 一点点）时，浏览器会把 scrollTop 钳到新的 floor——这就是「向上拉动页面
-      // 自动被拉回到最底下」：每趟 scan 折掉底部附近的消息，人就被钳回底部。
-      // 宿主的贴底跟随阈值只有 1px（离开即释放 follow），所以症状主因是钳位。
-      // 修法：每趟 scan 前后取滚动位置，仅当「位置被钳到了新 floor 且新 floor
-      // 低于原位」时恢复原位；读者本来贴底不碰；宿主自己滚动的中间位置不碰。
+      // ---- 滚动位置补偿（「向上滚被拉回最底下」的病根修复，0.10.5 重做）----
+      // 病根：折叠/展开会改变对话区总高度。旧版（0.10.4）在 scan 后按 scrollTop
+      // 数值恢复，但读者刚离开底部时其**下方**的消息仍被折叠，文档变矮后原来的
+      // scrollTop 已超过新的最大滚动位置，赋值会被浏览器再次钳回新 floor——恢复
+      // 无效，而且钳位触发的 scroll 事件又调度下一趟 scan，恶性循环把读者一路拽
+      // 到底。数值恢复在几何上无解，所以这一版是两层修复：
+      //  1. 源头：读者不贴底时，isNearViewport 不再把视口下方一屏算进折叠窗口，
+      //     下方的消息不折叠，文档就不会在读者脚下变矮，钳位拉底根本不发生。
+      //  2. 锚点：视口上方折叠仍会让文档变矮、内容上滑。scan 前锚住视口内第一个
+      //     可见消息行，scan 后按它相对视口的位置差调整 scrollTop，读者正在读的
+      //     内容纹丝不动（上方折叠/展开都适用；下方变化不碰锚点，天然不补偿）。
       const scrollRootOf = () => doc.querySelector('[data-conversation-scroll]') ?? doc.body
       let scrollAnchor = null
+
+      /** 视口内第一个可见的消息行（DOM 顺序 = 文档顺序）。 */
+      function pickAnchorEl() {
+        const height = win.innerHeight || 800
+        // 快路径（真浏览器 O(1)）：视口 1/4 高度处、对话列中心向上找最近的消息行。
+        if (typeof doc.elementFromPoint === 'function') {
+          const x = Math.round((win.innerWidth || 800) / 2)
+          const probe = doc.elementFromPoint(x, Math.round(height * 0.25))
+          const hit = probe && typeof probe.closest === 'function' ? probe.closest(FLOW_ITEM) : null
+          if (hit) return hit
+        }
+        // 慢路径（假 DOM / 视口顶部空白）：遍历文档顺序，取第一个与视口相交的行。
+        for (const el of doc.querySelectorAll(FLOW_ITEM)) {
+          const rect = el.getBoundingClientRect()
+          if (rect.bottom <= 0) continue // 完全滚出视口上方，继续向下找
+          return rect.top < height && rect.height > 0 ? el : null
+        }
+        return null
+      }
 
       function captureScrollAnchor() {
         const root = scrollRootOf()
         const top = root.scrollTop
         const floor = Math.max(0, root.scrollHeight - root.clientHeight)
-        scrollAnchor = { root, top, pinned: floor - top <= 2 }
+        const anchorEl = pickAnchorEl()
+        scrollAnchor = {
+          root,
+          top,
+          pinned: floor - top <= 2,
+          anchorEl,
+          anchorTop: anchorEl ? anchorEl.getBoundingClientRect().top : null
+        }
       }
 
       function restoreScrollAnchor() {
@@ -2390,11 +2426,27 @@
         const { root, top, pinned } = saved
         stats.scrollFix.runs += 1
         if (pinned) { stats.scrollFix.pinnedSkipped += 1; return }
+
+        // 锚点补偿：扫描折叠了视口上方的消息时，锚点元素相对视口上移 delta，
+        // 把 scrollTop 减去这个量，读者正在读的内容就纹丝不动。
+        if (saved.anchorEl && saved.anchorEl.isConnected && saved.anchorTop !== null) {
+          const newTop = saved.anchorEl.getBoundingClientRect().top
+          const delta = newTop - saved.anchorTop
+          if (Math.abs(delta) > 0.5) {
+            const floor = Math.max(0, root.scrollHeight - root.clientHeight)
+            root.scrollTop = Math.max(0, Math.min(floor, top + delta))
+            stats.scrollFix.anchorAdjusted += 1
+            stats.scrollFix.lastDelta = delta
+            return
+          }
+        }
+
+        // 兜底：锚点不可用（元素被宿主换掉）且位置被钳到新 floor 时，只记录。
+        // top 已高于新的最大滚动位置，任何恢复都会被再次钳位——几何上无解，
+        // 真正的防线是「不贴底不折视口下方」，它让这种钳位根本不发生。
         const newFloor = Math.max(0, root.scrollHeight - root.clientHeight)
-        // 被钳到（新）floor 且新 floor 低于原位置 → 恢复原位。
         if (root.scrollTop >= newFloor && newFloor < top) {
-          root.scrollTop = top
-          stats.scrollFix.adjusted += 1
+          stats.scrollFix.clampedNoAnchor += 1
           stats.scrollFix.lastDelta = top - newFloor
         }
       }
@@ -2465,8 +2517,10 @@
             continue
           }
           // Off-screen rows keep whatever fit they already have: measuring each one
-          // costs a forced layout, and nobody can see the result.
-          if (existing === undefined && !isNearViewport(anchor)) {
+          // costs a forced layout, and nobody can see the result. The window below
+          // the viewport only opens while the reader is pinned to the bottom — see
+          // the scroll-anchor note above scan().
+          if (existing === undefined && !isNearViewport(anchor, scrollAnchor?.pinned)) {
             if (isAssistant) stats.side.offscreen += 1
             else stats.side.userOffscreen += 1
             continue
