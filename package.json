@@ -1,7 +1,7 @@
 {
   "name": "dsh-fold-polish",
-  "version": "0.10.5",
-  "description": "Display polish for the DeepSeek Harness conversation: fold overlong messages and work-step blocks, resize the composer and the right sidebar, and search folded content. Pure client-side and display-only.",
+  "version": "1.1.0",
+  "description": "DeepSeek Harness conversation polish: message and step folding, composer and sidebar sizing, folded-content search, turn timing, and confirmed local conversation history deletion.",
   "keywords": [
     "dsh",
     "deepseek-harness",
@@ -29,9 +29,8 @@
     "cordis.patch.yml",
     "README.md",
     "CHANGELOG.md",
-    "assets/demo.gif",
-    "assets/step-fold-default.png",
-    "assets/step-fold-expanded.png"
+    "src",
+    "scripts/build.mjs"
   ],
   "dsh": {
     "bundle": {
@@ -58,5 +57,11 @@
   "homepage": "https://github.com/FiVE0016/dsh-fold-polish#readme",
   "bugs": {
     "url": "https://github.com/FiVE0016/dsh-fold-polish/issues"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node scripts/regression-check.mjs --fast",
+    "test:browser": "node test/rewrite-browser.mjs",
+    "check": "node scripts/regression-check.mjs"
   }
 }

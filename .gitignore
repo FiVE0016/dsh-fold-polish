@@ -1,5 +1,7 @@
 # 一次性的本地产物，不进仓库
 node_modules/
+work/
+*.tgz
 
 # 测试自己生成的：headless Chrome 用户目录与失败转储
 test/_chrome-*/

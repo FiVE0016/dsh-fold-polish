@@ -1,70 +1,128 @@
-// Guards the per-turn timer's HOST wiring. These exist because the feature
-// silently degraded once already: the tests passed while the chip never
-// appeared, because a missing service only produced a console warning that
-// nothing asserted on.
-//
-// The two failure modes this file pins down:
-//   1. `inject` omits uiConversation/sessions → the restricted ctx hands back
-//      null and the probe can never see a session.
-//   2. The probe depends on props the host may not inject (useSessions).
-//      It must read the session from the ctx instead.
+import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
-import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { createTurnTimerStore, watchTurnTimers } from '../src/turn-timer.js'
 
-const here = path.dirname(fileURLToPath(import.meta.url))
-const root = path.resolve(here, '..')
+function source(initial) {
+  let value = initial
+  const listeners = new Set()
+  return {
+    getSnapshot: () => value,
+    subscribe(fn) {
+      listeners.add(fn)
+      return () => listeners.delete(fn)
+    },
+    set(next) {
+      value = next
+      for (const fn of [...listeners]) fn()
+    },
+    count: () => listeners.size,
+  }
+}
+const snapshot = (status, end = 2000) => ({
+  timeline: { turns: new Map([[1, { status }]]) },
+  legacy: {
+    nodes: [
+      {
+        kind: 'assistant',
+        turn: 1,
+        timing: { stepStartTime: 1000, completedTime: end },
+      },
+    ],
+    partial: null,
+  },
+})
 
-let passed = 0
-let failed = 0
-function test(name, fn) {
-  try {
-    fn()
-    passed += 1
-    console.log(`  ok   ${name}`)
-  } catch (error) {
-    failed += 1
-    console.error(`  FAIL ${name}\n       ${error.message}`)
+function fixture() {
+  const chatA = source(snapshot('open'))
+  const chatB = source(snapshot('closed', 6000))
+  const open = source(1)
+  const list = source({ byId: { wrong: {} } })
+  const bindings = {
+    a: { target: () => chatA, openTurn: open },
+    b: { target: () => chatB, openTurn: source(undefined) },
+  }
+  let id = 'a'
+  const occurrence = { isConnected: true, getAttribute: () => id }
+  let callback
+  let disconnected = false
+  const view = {
+    MutationObserver: class {
+      constructor(fn) {
+        callback = fn
+      }
+      observe() {}
+      disconnect() {
+        disconnected = true
+      }
+    },
+    setInterval() {
+      throw Error('polling forbidden')
+    },
+  }
+  const doc = {
+    documentElement: {},
+    querySelector: () => (id ? occurrence : null),
+  }
+  const store = createTurnTimerStore()
+  const reads = []
+  const off = watchTurnTimers({
+    document: doc,
+    view,
+    conversation: {
+      binding(next) {
+        reads.push(next)
+        return bindings[next]
+      },
+    },
+    sessions: { list },
+    store,
+  })
+  return {
+    store,
+    off,
+    reads,
+    list,
+    chatA,
+    chatB,
+    open,
+    disconnected: () => disconnected,
+    switch(next) {
+      id = next
+      callback([{ type: 'attributes', target: occurrence }])
+    },
   }
 }
 
-const entry = readFileSync(path.join(root, 'src', 'client-entry.js'), 'utf8')
-const built = readFileSync(path.join(root, 'client.js'), 'utf8')
-
-test('inject declares every service the per-turn probe reads', () => {
-  const match = entry.match(/inject:\s*\[([^\]]*)\]/)
-  assert.ok(match, 'no inject declaration found')
-  const declared = match[1].split(',').map((s) => s.trim().replace(/['"]/g, ''))
-  for (const service of ['slots', 'uiConversation', 'sessions']) {
-    assert.ok(declared.includes(service), `inject 缺少 ${service}（探针会静默降级）: ${JSON.stringify(declared)}`)
-  }
+test('subscribed snapshots wait for turn completion and publish the last output time', () => {
+  const f = fixture()
+  assert.deepEqual(f.store.get(), {})
+  assert.equal(f.chatA.count(), 1)
+  f.chatA.set(snapshot('closed', 4500))
+  assert.deepEqual(f.store.get(), {})
+  f.open.set(undefined)
+  assert.deepEqual(f.store.get(), { 1: 3500 })
+  f.off()
 })
 
-test('the probe never depends on host-injected props (uses ctx.get instead)', () => {
-  // The earlier version read props.useSessions from a shell.overlay component.
-  // That is not guaranteed, and it is what made the chip a no-op in the app.
-  assert.equal(/props\.useSessions/.test(entry), false, '探针仍在依赖 props.useSessions（宿主不保证注入）')
-  assert.ok(/ctx\s*\?\.\s*get\s*\?\.\s*\(\s*'sessions'\s*\)/.test(entry), '探针没有从 ctx 取 sessions')
-  assert.ok(/ctx\s*\?\.\s*get\s*\?\.\s*\(\s*'uiConversation'\s*\)/.test(entry), '探针没有从 ctx 取 uiConversation')
+test('switching sessions releases prior sources and never chooses a catalog fallback', () => {
+  const f = fixture()
+  f.switch('b')
+  assert.equal(f.chatA.count(), 0)
+  assert.equal(f.chatB.count(), 1)
+  assert.deepEqual(f.store.get(), { 1: 5000 })
+  f.switch(null)
+  assert.deepEqual(f.store.get(), {})
+  assert.equal(f.chatB.count(), 0)
+  assert.equal(f.reads.includes('wrong'), false)
+  f.off()
+  assert.equal(f.list.count(), 0)
+  assert.equal(f.disconnected(), true)
 })
 
-test('the probe still uses the verified binding/target/getSnapshot route', () => {
-  assert.ok(/conv\.binding\(/.test(entry), '缺少 binding()')
-  assert.ok(/\.target\('chat'\)/.test(entry), "缺少 target('chat')")
-  assert.ok(/getSnapshot/.test(entry), '缺少 getSnapshot')
-  assert.ok(/legacy\?\.nodes|legacy\.nodes/.test(entry), '缺少 legacy.nodes 读取')
+test('hosts without a closed-turn signal show no misleading duration', () => {
+  const f = fixture()
+  f.open.set(undefined)
+  f.chatA.set({ legacy: snapshot('closed').legacy })
+  assert.deepEqual(f.store.get(), {})
+  f.off()
 })
-
-test('turn durations come from the pure module (no duplicated timing math)', () => {
-  assert.ok(/turnTimer\.turnDurations\(/.test(entry), '入口没有复用 turn-timer.js 的 turnDurations')
-})
-
-test('the built bundle carries the new wiring (client.js is in sync)', () => {
-  assert.ok(built.includes("target('chat')"), 'client.js 未包含 target(chat) —— 忘记 rebuild')
-  assert.ok(built.includes("'uiConversation'"), 'client.js 未声明 uiConversation —— 忘记 rebuild')
-  assert.ok(built.includes("'sessions'"), 'client.js 未声明 sessions —— 忘记 rebuild')
-})
-
-console.log(`\n${passed} passed, ${failed} failed`)
-if (failed > 0) process.exit(1)

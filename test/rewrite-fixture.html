@@ -1,0 +1,584 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>Fold Polish rewrite acceptance fixture</title>
+    <style>
+      :root {
+        --dsw-alias-bg-base: #fff;
+        color-scheme: light;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: #f6f7f9;
+        color: #17202e;
+        font:
+          14px/24px 'Segoe UI',
+          'Microsoft YaHei',
+          sans-serif;
+      }
+      #app {
+        height: 100vh;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 300px;
+      }
+      #main {
+        min-width: 0;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+      }
+      #toolbar {
+        height: 48px;
+        flex: none;
+        padding: 12px 24px;
+        background: white;
+        border-bottom: 1px solid #e1e4e9;
+      }
+      #scroll {
+        flex: 1;
+        min-height: 0;
+        overflow: auto;
+        padding: 16px 28px 44px;
+        overflow-anchor: auto;
+      }
+      #conversation {
+        max-width: 760px;
+        margin: 0 auto;
+      }
+      #rightbar {
+        min-width: 0;
+        border-left: 1px solid #e1e4e9;
+        padding: 18px;
+        background: #fff;
+      }
+      .flowItem {
+        min-width: 0;
+        margin-top: 12px;
+      }
+      .userRow {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        gap: 6px;
+      }
+      .userStack {
+        min-width: 0;
+        max-width: 80%;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        gap: 8px;
+      }
+      .bubble {
+        background: #e2ebff;
+        border-radius: 16px;
+        max-width: 100%;
+        padding: 10px 16px;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        font-size: 14px;
+        line-height: 24px;
+      }
+      .mdRoot {
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .mdBody {
+        min-width: 0;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        font-size: 14px;
+        line-height: 24px;
+      }
+      .mdBody p {
+        margin: 0;
+      }
+      .mdBody img {
+        width: 170px;
+        height: 140px;
+        display: block;
+        border: 2px solid #4c779e;
+        border-radius: 8px;
+      }
+      .processSummary,
+      .groupHeader {
+        display: block;
+        padding: 5px 0;
+        width: 100%;
+        border: none;
+        background: transparent;
+        text-align: left;
+        font: inherit;
+        color: #728095;
+      }
+      .groupBody {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .member {
+        margin: 3px 0;
+        padding: 8px 12px;
+        color: #607086;
+        border: 1px solid #dce2eb;
+        border-radius: 8px;
+        background: white;
+        white-space: pre-wrap;
+      }
+      [hidden] {
+        display: none;
+      }
+      #composerSeat {
+        flex: none;
+        padding: 10px 24px 14px;
+        background: #f6f7f9;
+      }
+      #composerCard {
+        box-sizing: border-box;
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        max-width: 760px;
+        margin: auto;
+        border: 0;
+        border-radius: 14px;
+        padding: 8px 0 0;
+        background: white;
+      }
+      #editorScroll {
+        max-height: var(--dsh-composer-text-max-height, 336px);
+        overflow-y: auto;
+      }
+      #editor {
+        box-sizing: border-box;
+        min-height: 36px;
+        padding: 4px 8px 0 14px;
+        outline: none;
+      }
+      #composerActions {
+        display: flex;
+        justify-content: flex-end;
+        align-items: center;
+        gap: 12px;
+        padding: 2px 8px 6px;
+      }
+      #composerActions button {
+        display: grid;
+        place-items: center;
+        width: 34px;
+        height: 34px;
+        border: 0;
+        border-radius: 999px;
+        padding: 0;
+        background: #5c8fff;
+        color: white;
+        transform: translateY(-2px);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app" style="grid-template-columns: 0px minmax(0, 1fr) 300px">
+      <nav aria-hidden="true"></nav>
+      <main id="main">
+        <div id="toolbar">Fold Polish · 行为验收</div>
+        <div id="scroll" data-conversation-scroll>
+          <div id="conversation">
+            <div
+              class="flowItem"
+              data-chat-flow-kind="user"
+              data-chat-turn="1"
+              data-chat-anchor-key="user:1"
+            >
+              <div class="userRow">
+                <div class="userStack">
+                  <div class="bubble" id="user1"></div>
+                </div>
+              </div>
+            </div>
+            <div
+              class="flowItem"
+              data-chat-flow-kind="turn-process"
+              data-chat-turn="1"
+              data-chat-anchor-key="process:1"
+            >
+              <button
+                class="processSummary"
+                type="button"
+                data-turn-process="1"
+                disabled
+              >
+                已完成，用时 9秒
+              </button>
+            </div>
+            <div
+              class="flowItem groupRoot"
+              data-chat-group-key="group:1"
+              data-chat-flow-key="group:1"
+              data-chat-turn="1"
+              data-chat-anchor-key="group:1"
+              data-step-process
+            >
+              <div>
+                <button
+                  class="groupHeader"
+                  type="button"
+                  aria-expanded="true"
+                  aria-controls="groupBody1"
+                >
+                  工作步骤 · 2 步
+                </button>
+              </div>
+              <div class="groupBody" id="groupBody1" data-step-process-body>
+                <div data-step-process-content>
+                  <div
+                    id="groupStep1"
+                    class="member"
+                    data-chat-flow-kind="tool-call"
+                    data-turn-process-member
+                  >
+                    读取文件 GROUP_HIDDEN_NEEDLE<button
+                      id="toolDetailButton"
+                      type="button"
+                      data-turn-process="tool-detail"
+                      aria-expanded="false"
+                      aria-controls="toolDetailBody"
+                    >
+                      查看原始工具返回
+                    </button>
+                    <div id="toolDetailBody" hidden>
+                      工具内部详情，默认保持折叠。
+                    </div>
+                  </div>
+                  <div
+                    id="groupStep2"
+                    class="member"
+                    data-chat-flow-kind="assistant-step"
+                    data-turn-process-member
+                  >
+                    核对旧版行为与边界
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div
+              class="flowItem"
+              data-chat-flow-kind="assistant-step"
+              data-chat-turn="1"
+              data-chat-anchor-key="answer:1"
+            >
+              <div class="mdRoot"><div class="mdBody" id="answer1"></div></div>
+            </div>
+
+            <div
+              class="flowItem"
+              data-chat-flow-kind="user"
+              data-chat-turn="2"
+              data-chat-anchor-key="user:2"
+            >
+              <div class="userRow">
+                <div class="userStack">
+                  <div class="bubble" id="user2"></div>
+                </div>
+              </div>
+            </div>
+            <div
+              class="flowItem"
+              data-chat-flow-kind="turn-process"
+              data-chat-turn="2"
+              data-chat-anchor-key="process:2a"
+            >
+              <button
+                class="processSummary"
+                type="button"
+                data-turn-process="2"
+                disabled
+              >
+                第一段工作步骤
+              </button>
+            </div>
+            <div
+              id="inlineStep1"
+              class="flowItem member"
+              data-chat-flow-kind="tool-call"
+              data-chat-turn="2"
+              data-turn-process-member
+            >
+              第一次检查 INLINE_HIDDEN_NEEDLE
+            </div>
+            <div
+              class="flowItem"
+              data-chat-flow-kind="assistant-step"
+              data-chat-turn="2"
+              data-chat-anchor-key="middle:2"
+            >
+              <div class="mdRoot">
+                <div class="mdBody" id="middle2">中间说明，不是工具步骤。</div>
+              </div>
+            </div>
+            <div
+              class="flowItem"
+              data-chat-flow-kind="turn-process"
+              data-chat-turn="2"
+              data-chat-anchor-key="process:2b"
+            >
+              <button
+                class="processSummary"
+                type="button"
+                data-turn-process="2"
+                disabled
+              >
+                第二段工作步骤
+              </button>
+            </div>
+            <div
+              id="inlineStep2"
+              class="flowItem member"
+              data-chat-flow-kind="tool-call"
+              data-chat-turn="2"
+              data-turn-process-member
+            >
+              第二次检查 SHARED_MATCH
+            </div>
+            <div
+              id="inlineStep3"
+              class="flowItem member"
+              data-chat-flow-kind="assistant-step"
+              data-chat-turn="2"
+              data-turn-process-member
+            >
+              整理结果与验证
+            </div>
+            <div
+              class="flowItem"
+              data-chat-flow-kind="assistant-step"
+              data-chat-turn="2"
+              data-chat-anchor-key="answer:2"
+            >
+              <div class="mdRoot"><div class="mdBody" id="answer2"></div></div>
+            </div>
+
+            <div
+              class="flowItem"
+              data-chat-flow-kind="user"
+              data-chat-turn="3"
+              data-chat-anchor-key="user:3"
+            >
+              <div class="userRow">
+                <div class="userStack">
+                  <div class="bubble" id="user3"></div>
+                </div>
+              </div>
+            </div>
+            <div
+              class="flowItem"
+              data-chat-flow-kind="assistant-step"
+              data-chat-turn="3"
+              data-chat-anchor-key="answer:3"
+            >
+              <div class="mdRoot"><div class="mdBody" id="answer3"></div></div>
+            </div>
+          </div>
+        </div>
+        <div id="composerSeat" data-composer-seat>
+          <div id="composerCard" data-composer-card>
+            <div id="editorScroll" data-input-scroll>
+              <div id="editor" contenteditable="true">
+                输入区，用于验证顶部拖拽手柄。
+              </div>
+            </div>
+            <div id="composerActions">
+              <button type="button" aria-label="发送">↑</button>
+            </div>
+          </div>
+        </div>
+      </main>
+      <aside id="rightbar" data-rightbar-col><div>右侧辅助栏</div></aside>
+    </div>
+    <script type="module">
+      if (!new URLSearchParams(location.search).has('persist'))
+        localStorage.clear()
+      const lines = (label, length, needle = '') =>
+        Array.from(
+          { length },
+          (_, index) =>
+            `${label}第 ${index + 1} 行${index === 8 ? ` ${needle}` : ''}`,
+        ).join('\n')
+      for (const id of ['user1', 'user2', 'user3'])
+        document.getElementById(id).textContent = lines(
+          '用户输入',
+          12,
+          id === 'user1' ? 'USER_HIDDEN_NEEDLE' : '',
+        )
+      document.getElementById('answer1').textContent = lines(
+        '助手回复',
+        14,
+        'ANSWER_HIDDEN_NEEDLE SHARED_MATCH',
+      )
+      document.getElementById('answer3').textContent = lines('最新回复', 12)
+      const imageBody = document.getElementById('answer2')
+      const before = document.createElement('p')
+      before.textContent = lines('图片前正文', 5)
+      const image = document.createElement('img')
+      image.alt = '完整蓝色验收图片'
+      image.src =
+        'data:image/svg+xml,' +
+        encodeURIComponent(
+          '<svg xmlns="http://www.w3.org/2000/svg" width="170" height="140"><rect width="170" height="140" fill="#c5e0f0"/><path d="M0 0L170 140M0 140L170 0" stroke="#4c779e" stroke-width="3"/><text x="85" y="75" text-anchor="middle" fill="#26465e">170 × 140</text></svg>',
+        )
+      const after = document.createElement('p')
+      after.textContent = lines('图片后正文', 7).replace(
+        '第 7 行',
+        '第 7 行 IMAGE_HIDDEN_NEEDLE',
+      )
+      const picture = document.createElement('picture')
+      const source = document.createElement('source')
+      source.type = 'image/svg+xml'
+      source.srcset = image.src
+      picture.append(source, image)
+      imageBody.append(before, picture, after)
+      window.fixture = {
+        lines,
+        initialText: Object.fromEntries(
+          [...document.querySelectorAll('.bubble,.mdBody,.member')].map(
+            (element) => [element.id, element.textContent],
+          ),
+        ),
+        originalComposerStyle: document
+          .getElementById('composerSeat')
+          .getAttribute('style'),
+        replaceAnswer(id) {
+          const source = document.getElementById(id)
+          const replacement = document.createElement('div')
+          replacement.className = 'mdBody'
+          replacement.id = id
+          replacement.textContent = source.textContent
+          source.replaceWith(replacement)
+          return replacement
+        },
+        addTurn(turn) {
+          const host = document.getElementById('conversation')
+          for (const [kind, prefix, cls] of [
+            ['user', 'user', 'bubble'],
+            ['assistant-step', 'answer', 'mdBody'],
+          ]) {
+            const row = document.createElement('div')
+            row.className = 'flowItem'
+            row.dataset.chatFlowKind = kind
+            row.dataset.chatTurn = turn
+            row.dataset.chatAnchorKey = `${prefix}:${turn}`
+            row.innerHTML =
+              kind === 'user'
+                ? `<div class="userRow"><div class="userStack"><div id="${prefix}${turn}" class="${cls}"></div></div></div>`
+                : `<div class="mdRoot"><div id="${prefix}${turn}" class="${cls}"></div></div>`
+            row.querySelector(`#${prefix}${turn}`).textContent = lines(
+              `第${turn}轮`,
+              12,
+            )
+            host.append(row)
+          }
+        },
+      }
+      for (const header of document.querySelectorAll('.groupHeader'))
+        header.addEventListener('click', () => {
+          const body = document.getElementById(
+            header.getAttribute('aria-controls'),
+          )
+          const next = header.getAttribute('aria-expanded') !== 'true'
+          header.setAttribute('aria-expanded', String(next))
+          body.hidden = !next
+        })
+      document
+        .getElementById('toolDetailButton')
+        .addEventListener('click', (event) => {
+          const button = event.currentTarget
+          const next = button.getAttribute('aria-expanded') !== 'true'
+          button.setAttribute('aria-expanded', String(next))
+          document.getElementById('toolDetailBody').hidden = !next
+        })
+      image.addEventListener('click', () => {
+        window.fixture.imageClicks = (window.fixture.imageClicks || 0) + 1
+      })
+      const [fold, timer, browser] = await Promise.all([
+        import('../src/fold.js'),
+        import('../src/turn-timer.js'),
+        import('../src/browser.js'),
+      ])
+      const turnTimers = timer.createTurnTimerStore()
+      window.__DSH_BUBBLE_FOLD_MODULES__ = {
+        fold,
+        turnTimer: timer,
+        './src/fold.js': fold,
+        './src/turn-timer.js': timer,
+      }
+      window.__DSH_TURN_TIMERS__ = turnTimers
+      window.turnTimers = turnTimers
+      window.fixture.fold = fold
+      window.fixture.turnTimers = turnTimers
+      window.fixture.restart = () => {
+        window.controller?.dispose()
+        window.controller = browser.start(
+          window,
+          { createElement: () => null },
+          turnTimers,
+        )
+        return window.controller
+      }
+      window.fixture.restart()
+      window.fixture.startRightbar = async () => {
+        const { createRightbarControl } = await import('../src/rightbar.js')
+        let storedWidth = 300
+        const listeners = new Set()
+        const frame = document.getElementById('app')
+        const render = () => {
+          frame.style.gridTemplateColumns = `0px minmax(0, 1fr) ${frame.hasAttribute('data-rightbar-collapsed') ? 0 : storedWidth}px`
+          for (const fn of listeners) fn()
+        }
+        const layout = {
+          panels: {
+            setRightbar(width) {
+              storedWidth = width
+              render()
+            },
+            setViewportWidth() {},
+          },
+          panelInfo: {
+            subscribe(fn) {
+              listeners.add(fn)
+              return () => listeners.delete(fn)
+            },
+          },
+        }
+        window.fixture.rightbar = createRightbarControl({
+          layout,
+          view: window,
+          document,
+          getSettings: () => window.controller.settings(),
+          updateSettings: (patch) => window.controller.update(patch),
+        })
+        window.fixture.closeRightbar = () => {
+          frame.setAttribute('data-rightbar-collapsed', '')
+          document.getElementById('rightbar').hidden = true
+          render()
+        }
+        window.fixture.openRightbar = () => {
+          frame.removeAttribute('data-rightbar-collapsed')
+          document.getElementById('rightbar').hidden = false
+          render()
+        }
+        window.fixture.manualRightbarWidth = (width) => {
+          storedWidth = width
+          render()
+        }
+        return window.fixture.rightbar
+      }
+      window.fixture.ready = true
+    </script>
+  </body>
+</html>

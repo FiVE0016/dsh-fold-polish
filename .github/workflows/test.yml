@@ -1,36 +1,20 @@
 name: test
-
-# 纯 Node 测试：不需要浏览器、不需要网络。真要跑渲染检查请在本机执行
-# `node test/visual-check.mjs`（它需要一个本地 Chrome）。
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
-
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
-
-      - name: client.js 与 src/ 是否同步
-        run: node scripts/build.mjs --check
-
-      - name: 纯逻辑测试
-        run: node test/fold.test.mjs
-
-      - name: DOM / 交互 / 真实构建产出
-        run: node test/runtime.test.mjs
-
-      - name: 客户端入口与设置页注册契约
-        run: node test/entry.test.mjs
-
-      # 把 docs/回归检查清单.md 里每一条防线变成断言（回环调用上面几个测试，
-      # 外加对源码的静态不变量检查）。--fast 跳过需要无头 Chrome 的浏览器专项。
-      - name: 老 bug 回归检查
-        run: node scripts/regression-check.mjs --fast
+          node-version: 22
+      - name: Build consistency and Node behavior tests
+        run: npm test
+      - name: Real Chromium acceptance
+        env:
+          CHROME: /usr/bin/google-chrome
+        run: npm run test:browser

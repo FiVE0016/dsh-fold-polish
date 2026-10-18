@@ -1,18 +1,17 @@
-// The find panel that lives in the RIGHT sidebar, as a tab of its own: the right
-// column is where the reader's auxiliary panels already are, and it opens beside
-// the conversation instead of replacing it.
-//
-// The tab system wants three registrations sharing one id (the shape the shipped
-// context/schedule panels use): the tab type, the panel body, and the title chip.
-//
-// The search engine is the DOM-layer controller's `search`/`revealAt`: folded
-// content is always in the DOM, so a hit inside a folded message or step block
-// is found and then revealed by unfolding exactly what hides it.
-
+// The right-sidebar search view. The controller indexes both visible and folded
+// content and returns opaque element handles that revealAt can open and locate.
 export function createFindPanel(React, api) {
   const h = React.createElement
+  const sameHit = (left, right) =>
+    left &&
+    right &&
+    left.element === right.element &&
+    left.kind === right.kind &&
+    left.snippet === right.snippet
+  const sameHits = (left, right) =>
+    left.length === right.length &&
+    left.every((hit, index) => sameHit(hit, right[index]))
 
-  /** The tab's chip text. */
   function Title() {
     return h('span', { 'data-lf-find-chip': '1' }, '查找')
   }
@@ -20,62 +19,136 @@ export function createFindPanel(React, api) {
   function Panel() {
     const [query, setQuery] = React.useState('')
     const [hits, setHits] = React.useState([])
-    const [active, setActive] = React.useState(0)
-    const inputRef = React.useRef?.(null)
-    const jumpRef = React.useRef?.(() => {})
+    const [active, setActive] = React.useState(-1)
+    const inputRef = React.useRef(null)
+    const stateRef = React.useRef({ query: '', hits: [], active: -1 })
 
-    const run = (next) => {
-      setQuery(next)
-      const found = api.search(next)
-      setHits(found)
-      setActive(found.length > 0 ? 0 : -1)
+    const refresh = (nextQuery = stateRef.current.query, reset = false) => {
+      const previous = stateRef.current
+      const result = nextQuery.trim() ? api.search(nextQuery) : []
+      const found = Array.isArray(result) ? result : []
+      let index = -1
+      if (!reset && previous.active >= 0) {
+        const selected = previous.hits[previous.active]
+        index = found.findIndex((hit) => sameHit(hit, selected))
+        if (index < 0 && found.length)
+          index = Math.min(previous.active, found.length - 1)
+      }
+      stateRef.current = { query: nextQuery, hits: found, active: index }
+      if (!sameHits(previous.hits, found)) setHits(found)
+      if (previous.active !== index) setActive(index)
+      return found
     }
+
     const jump = (index) => {
-      const hit = hits[index]
+      const current = stateRef.current
+      const hit = current.hits[index]
       if (!hit) return
+      current.active = index
       setActive(index)
       api.revealAt(hit.element)
     }
-    jumpRef.current = jump
 
-    // Focus the input whenever the panel opens (keyboard route included).
     React.useEffect(() => {
-      api.onFindPanelMounted?.(() => {
-        const input = inputRef.current
-        if (input && typeof input.focus === 'function') input.focus()
-      })
+      const focus = () => inputRef.current?.focus()
+      const mountedOff = api.onFindPanelMounted?.(focus)
+      const off = api.subscribe?.(() => refresh())
+      focus()
+      return () => {
+        if (typeof off === 'function') off()
+        if (typeof mountedOff === 'function') mountedOff()
+        else api.onFindPanelMounted?.(null)
+      }
     }, [])
 
-    return h('div', { 'data-lf-find': '1' },
-      h('div', { 'data-lf-find-head': '1' },
+    const change = (value) => {
+      setQuery(value)
+      refresh(value, true)
+    }
+    const navigate = (backwards) => {
+      const found = refresh()
+      if (!found.length) return
+      const index = stateRef.current.active
+      jump(
+        index < 0
+          ? backwards
+            ? found.length - 1
+            : 0
+          : (index + (backwards ? -1 : 1) + found.length) % found.length,
+      )
+    }
+
+    return h(
+      'div',
+      { 'data-lf-find': '1' },
+      h(
+        'div',
+        { 'data-lf-find-head': '1' },
         h('input', {
           ref: inputRef,
-          type: 'text',
-          placeholder: '搜索本会话（含折叠内容）',
+          type: 'search',
           value: query,
-          onChange: (event) => run(event.target.value),
+          'aria-label': '搜索本会话（含折叠内容）',
+          placeholder: '搜索消息和步骤（含折叠内容）',
+          onChange: (event) => change(event.target.value),
           onKeyDown: (event) => {
+            if (event.isComposing) return
             if (event.key === 'Enter') {
-              if (event.shiftKey) jump(Math.max(0, active - 1))
-              else jump(Math.min(hits.length - 1, active + 1))
+              event.preventDefault()
+              navigate(event.shiftKey)
             } else if (event.key === 'Escape') {
-              run('')
+              event.preventDefault()
+              change('')
             }
-          }
+          },
         }),
-        h('span', { 'data-lf-find-count': '1' }, query ? `${active + 1} / ${hits.length}` : '')),
-      h('div', { 'data-lf-find-list': '1' },
-        hits.length === 0 && query !== ''
-          ? h('div', { 'data-lf-find-empty': '1' }, '没有匹配。折叠起来的内容也会被搜索。')
-          : hits.map((hit, index) => h('button', {
-            key: `${hit.kind}:${index}`,
-            type: 'button',
-            'data-lf-find-row': '1',
-            'data-lf-find-active': index === active ? '1' : '0',
-            title: hit.kind === 'message' ? '跳到这条消息' : '跳到这一步',
-            onClick: () => jump(index)
-          }, h('span', { 'data-lf-find-kind': '1' }, hit.kind === 'message' ? '消息' : '步骤'),
-          h('span', { 'data-lf-find-snippet': '1' }, hit.snippet)))))
+        h(
+          'span',
+          { 'data-lf-find-count': '1', role: 'status', 'aria-live': 'polite' },
+          query.trim() ? `${active + 1} / ${hits.length}` : '',
+        ),
+      ),
+      h(
+        'div',
+        { 'data-lf-find-list': '1' },
+        !query.trim()
+          ? h(
+              'div',
+              { 'data-lf-find-empty': '1' },
+              '输入关键词搜索本会话。回车跳到下一项，Shift + 回车跳到上一项。',
+            )
+          : hits.length === 0
+            ? h(
+                'div',
+                { 'data-lf-find-empty': '1' },
+                '没有匹配。已包含折叠的消息和步骤。',
+              )
+            : hits.map((hit, index) =>
+                h(
+                  'button',
+                  {
+                    key: index,
+                    type: 'button',
+                    'data-lf-find-row': '1',
+                    'data-lf-find-active': index === active ? '1' : '0',
+                    'aria-current': index === active ? 'true' : undefined,
+                    title: '展开并跳到此位置',
+                    onClick: () => jump(index),
+                  },
+                  h(
+                    'span',
+                    { 'data-lf-find-kind': '1' },
+                    hit.kind === 'step' ? '步骤' : '消息',
+                  ),
+                  h(
+                    'span',
+                    { 'data-lf-find-snippet': '1' },
+                    String(hit.snippet ?? ''),
+                  ),
+                ),
+              ),
+      ),
+    )
   }
 
   return { Panel, Title }

@@ -1,130 +1,93 @@
-// Plain-Node checks for the per-turn duration logic. No framework, no DOM:
-// run with `node test/turn-timer.test.mjs`.
+import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createTurnTimerStore, formatDuration, turnDurations } from '../src/turn-timer.js'
-
-let passed = 0
-let failed = 0
-
-function test(name, fn) {
-  try {
-    fn()
-    passed += 1
-    console.log(`  ok   ${name}`)
-  } catch (error) {
-    failed += 1
-    console.error(`  FAIL ${name}\n       ${error.message}`)
-  }
-}
-
-// ---------------------------------------------------------------- formatDuration
-
-test('sub-10s keeps one decimal', () => {
-  assert.equal(formatDuration(3200), '3.2秒')
-  assert.equal(formatDuration(999), '1.0秒')
+import {
+  createTurnTimerStore,
+  formatDuration,
+  turnDurations,
+} from '../src/turn-timer.js'
+const assistant = (turn, start, end) => ({
+  kind: 'assistant',
+  turn,
+  timing: { stepStartTime: start, completedTime: end },
 })
 
-test('10s–60s rounds to whole seconds', () => {
-  assert.equal(formatDuration(42_000), '42秒')
-  assert.equal(formatDuration(59_600), '60秒')
+test('all durations keep seconds and one decimal with the required label', () => {
+  assert.equal(formatDuration(0), '本轮用时 0.0 秒')
+  assert.equal(formatDuration(999), '本轮用时 1.0 秒')
+  assert.equal(formatDuration(42000), '本轮用时 42.0 秒')
+  assert.equal(formatDuration(72000), '本轮用时 72.0 秒')
+  for (const value of [undefined, null, '1000', -1, NaN, Infinity])
+    assert.equal(formatDuration(value), '')
 })
 
-test('one minute and above reads as 分/秒', () => {
-  assert.equal(formatDuration(72_000), '1分12秒')
-  assert.equal(formatDuration(3_600_000), '60分0秒')
+test('multi-step timing spans first actual processing to final assistant completion', () => {
+  assert.deepEqual(
+    turnDurations([
+      assistant(2, 5000, 9000),
+      assistant(2, 1000, 3000),
+      assistant(3, 100, 200),
+    ]),
+    { 2: 8000, 3: 100 },
+  )
 })
 
-test('invalid input yields empty string', () => {
-  assert.equal(formatDuration(Number.NaN), '')
-  assert.equal(formatDuration(-5), '')
-  assert.equal(formatDuration(undefined), '')
+test('an intermediate settled step never finishes an open turn', () => {
+  const nodes = [assistant(1, 1000, 2000), assistant(2, 3000, 4000)]
+  const turns = new Map([
+    [1, { status: 'closed' }],
+    [2, { status: 'open' }],
+  ])
+  assert.deepEqual(turnDurations(nodes, { turns }), { 1: 1000 })
+  turns.set(2, { status: 'closed' })
+  assert.deepEqual(turnDurations(nodes, { turns, openTurn: 2 }), { 1: 1000 })
+  assert.deepEqual(turnDurations(nodes, { turns, partial: { turn: 2 } }), {
+    1: 1000,
+  })
+  assert.deepEqual(turnDurations(nodes, { turns }), { 1: 1000, 2: 1000 })
 })
 
-// ---------------------------------------------------------------- turnDurations
-
-test('a single-step turn spans start → completion', () => {
-  const nodes = [
-    { kind: 'user', turn: 1 },
-    { kind: 'assistant', turn: 1, step: 0, timing: { stepStartTime: 1000, firstTokenTime: 1200, completedTime: 4200 } }
-  ]
-  assert.deepEqual(turnDurations(nodes), { 1: 3200 })
-})
-
-test('a multi-step turn takes the FULL span (first start → last completion)', () => {
-  const nodes = [
-    { kind: 'assistant', turn: 5, step: 0, timing: { stepStartTime: 1000, completedTime: 3000 } },
-    { kind: 'assistant', turn: 5, step: 1, timing: { stepStartTime: 5000, completedTime: 9000 } }
-  ]
-  // The gap between steps (a tool run) is part of "收到命令到完成输出".
-  assert.deepEqual(turnDurations(nodes), { 5: 8000 })
-})
-
-test('out-of-order steps still widen the span', () => {
-  const nodes = [
-    { kind: 'assistant', turn: 2, step: 1, timing: { stepStartTime: 5000, completedTime: 9000 } },
-    { kind: 'assistant', turn: 2, step: 0, timing: { stepStartTime: 1000, completedTime: 3000 } }
-  ]
-  assert.deepEqual(turnDurations(nodes), { 2: 8000 })
-})
-
-test('user nodes and missing/invalid timing are skipped', () => {
-  const nodes = [
-    { kind: 'user', turn: 3, timing: { stepStartTime: 0, completedTime: 9999 } },
-    { kind: 'assistant', turn: 3, step: 0, timing: null },
-    { kind: 'assistant', turn: 3, step: 1, timing: { stepStartTime: 1000, completedTime: null } },
-    { kind: 'assistant', turn: 4, step: 0, timing: { stepStartTime: 5000, completedTime: 4000 } }
-  ]
-  assert.deepEqual(turnDurations(nodes), {})
-})
-
-test('garbage input yields an empty map', () => {
+test('unknown, incomplete or invalid timing produces no completed badge', () => {
+  assert.deepEqual(
+    turnDurations([assistant(1, 1000, 2000)], { turns: new Map() }),
+    {},
+  )
+  assert.deepEqual(
+    turnDurations([assistant(1, 1000, 2000), assistant(1, 2200, null)]),
+    {},
+  )
+  assert.deepEqual(
+    turnDurations([
+      assistant(1, 3000, 2000),
+      assistant(2, NaN, 4000),
+      assistant('3', 0, 10),
+      {
+        kind: 'user',
+        turn: 4,
+        timing: { stepStartTime: 0, completedTime: 50 },
+      },
+    ]),
+    {},
+  )
   assert.deepEqual(turnDurations(null), {})
-  assert.deepEqual(turnDurations(undefined), {})
-  assert.deepEqual(turnDurations('nope'), {})
 })
 
-// ---------------------------------------------------------------- store
-
-test('store notifies subscribers and reports the latest map', () => {
+test('the observable store deduplicates equal maps and isolates subscribers', () => {
   const store = createTurnTimerStore()
   const seen = []
-  const off = store.subscribe((durations) => seen.push(durations))
+  store.subscribe(() => {
+    throw Error('consumer')
+  })
+  const off = store.subscribe((value) => seen.push(value))
+  const input = { 1: 100 }
+  store.set(input)
+  input[1] = 999
   store.set({ 1: 100 })
-  store.set({ 1: 100, 2: 200 })
-  assert.deepEqual(store.get(), { 1: 100, 2: 200 })
-  assert.equal(seen.length, 2)
-  off()
-  store.set({ 3: 300 })
-  assert.equal(seen.length, 2)
-})
-
-test('a throwing listener does not break the rest', () => {
-  const store = createTurnTimerStore()
-  let reached = false
-  store.subscribe(() => { throw new Error('boom') })
-  store.subscribe(() => { reached = true })
-  store.set({ 1: 1 })
-  assert.equal(reached, true)
-})
-
-test('clear resets the map and notifies', () => {
-  const store = createTurnTimerStore()
-  let latest = null
-  store.subscribe((durations) => { latest = durations })
-  store.set({ 1: 5 })
+  assert.deepEqual(store.get(), { 1: 100 })
+  assert.equal(seen.length, 1)
   store.clear()
+  assert.equal(seen.length, 2)
   assert.deepEqual(store.get(), {})
-  assert.deepEqual(latest, {})
+  off()
+  store.set({ 2: 200 })
+  assert.equal(seen.length, 2)
 })
-
-// ---------------------------------------------------------------- normalizeSettings
-
-test('turnTimer survives normalizeSettings (default on, coercion works)', async () => {
-  const { normalizeSettings } = await import('../src/fold.js')
-  assert.equal(normalizeSettings({}).turnTimer, true)
-  assert.equal(normalizeSettings({ turnTimer: false }).turnTimer, false)
-  assert.equal(normalizeSettings({ turnTimer: 'nope' }).turnTimer, true)
-})
-
-console.log(`\n${passed} passed, ${failed} failed`)
-if (failed > 0) process.exit(1)

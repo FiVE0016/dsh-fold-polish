@@ -1,77 +1,193 @@
-// Per-turn duration chips — pure logic plus a tiny plain store.
-//
-// Data source (read-only, display-only like the rest of this plugin): the chat
-// snapshot's settled nodes, each carrying `turn` and `timing`
-// { stepStartTime, firstTokenTime, completedTime }. A Turn's duration is the
-// span from its FIRST step's start to its LAST step's completion — i.e. from
-// the host beginning to process the command to the final output landing.
-// (Verified pattern against gbeta/dsh-token-speed lib/client.js, MIT.)
-//
-// No DOM access here, so everything is unit-testable in plain Node.
+// Read-only timing adapter for DSH's observable Conversation chat target.
 
-/**
- * Human label for a duration: seconds below a minute ("3.2秒" / "42秒"),
- * minutes above ("1分12秒"). Invalid input yields ''.
- */
 export function formatDuration(ms) {
-  const value = Number(ms)
-  if (!Number.isFinite(value) || value < 0) return ''
-  const seconds = value / 1000
-  if (seconds < 60) return `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)}秒`
-  const minutes = Math.floor(seconds / 60)
-  const rest = Math.round(seconds % 60)
-  return `${minutes}分${rest}秒`
+  return typeof ms === 'number' && Number.isFinite(ms) && ms >= 0
+    ? `本轮用时 ${(ms / 1000).toFixed(1)} 秒`
+    : ''
 }
 
-/**
- * Fold settled assistant nodes into { turn: milliseconds }.
- * A step without usable timing is skipped; a Turn with no timed step has no
- * entry, which is exactly what the DOM layer needs to leave it chip-less.
- */
-export function turnDurations(nodes) {
-  const spans = {}
+/** A settled step is not a settled turn: tools can start another step afterwards. */
+export function turnDurations(nodes, { turns, openTurn, partial } = {}) {
   if (!Array.isArray(nodes)) return {}
+  const spans = new Map()
   for (const node of nodes) {
-    if (!node || node.kind !== 'assistant') continue
+    if (
+      node?.kind !== 'assistant' ||
+      !Number.isInteger(node.turn) ||
+      node.turn < 0
+    )
+      continue
     const timing = node.timing
     if (!timing) continue
     const start = timing.stepStartTime
     const end = timing.completedTime
-    if (typeof start !== 'number' || typeof end !== 'number') continue
-    if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) continue
-    const key = Number(node.turn)
-    if (!Number.isFinite(key)) continue
-    const span = spans[key] ?? (spans[key] = { start, end })
-    if (start < span.start) span.start = start
-    if (end > span.end) span.end = end
+    const span = spans.get(node.turn) ?? {
+      start: Infinity,
+      end: -Infinity,
+      pending: false,
+    }
+    spans.set(node.turn, span)
+    if (typeof start === 'number' && Number.isFinite(start))
+      span.start = Math.min(span.start, start)
+    if (typeof end === 'number' && Number.isFinite(end) && end >= start)
+      span.end = Math.max(span.end, end)
+    else span.pending = true
   }
   const durations = {}
-  for (const key of Object.keys(spans)) durations[key] = spans[key].end - spans[key].start
+  for (const [turn, span] of spans) {
+    if (span.pending || turn === openTurn || turn === partial?.turn) continue
+    // When supplied, the host's closed boundary is authoritative.
+    if (turns?.get && turns.get(turn)?.status !== 'closed') continue
+    if (Number.isFinite(span.start) && span.end >= span.start)
+      durations[turn] = span.end - span.start
+  }
   return durations
 }
 
-/** Plain observable store bridging the snapshot probe and the DOM pass. */
 export function createTurnTimerStore() {
-  let durations = {}
+  let durations = Object.freeze({})
   const listeners = new Set()
-  return {
-    get: () => durations,
-    set(next) {
-      durations = next && typeof next === 'object' ? next : {}
-      for (const listener of [...listeners]) {
-        try { listener(durations) } catch { /* one bad listener must not break the rest */ }
-      }
-    },
-    subscribe(fn) {
-      if (typeof fn !== 'function') return () => {}
-      listeners.add(fn)
-      return () => listeners.delete(fn)
-    },
-    clear() {
-      durations = {}
-      for (const listener of [...listeners]) {
-        try { listener(durations) } catch { /* ignore */ }
+  const set = (next) => {
+    const value = next && typeof next === 'object' ? next : {}
+    const keys = Object.keys(value)
+    if (
+      keys.length === Object.keys(durations).length &&
+      keys.every((key) => durations[key] === value[key])
+    )
+      return
+    durations = Object.freeze({ ...value })
+    for (const listener of [...listeners]) {
+      try {
+        listener(durations)
+      } catch {
+        /* isolate consumer failures */
       }
     }
+  }
+  return {
+    get: () => durations,
+    set,
+    clear: () => set({}),
+    subscribe(listener) {
+      if (typeof listener !== 'function') return () => {}
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    },
+  }
+}
+
+/** Follow the displayed conversation; no transport retention or page polling. */
+export function watchTurnTimers({
+  document: doc,
+  view,
+  conversation,
+  sessions,
+  store,
+}) {
+  const selector =
+    '[data-conversation-region="chat"][data-conversation-session]'
+  let disposed = false
+  let occurrence = null
+  let sessionId = null
+  let bound = null
+  let targetOff = () => {}
+  let openOff = () => {}
+  let listOff = () => {}
+  const safeOff = (off) => {
+    try {
+      off?.()
+    } catch {
+      /* optional host source */
+    }
+  }
+  const reset = () => {
+    safeOff(targetOff)
+    safeOff(openOff)
+    targetOff = openOff = () => {}
+    bound = null
+    store.clear()
+  }
+  const bind = () => {
+    if (disposed) return
+    const nextOccurrence = doc.querySelector?.(selector) ?? null
+    const nextId =
+      nextOccurrence?.getAttribute?.('data-conversation-session') || null
+    occurrence = nextOccurrence
+    let nextBound = null
+    try {
+      if (nextId) nextBound = conversation.binding(nextId)
+    } catch {
+      /* session not retained yet */
+    }
+    if (nextId === sessionId && nextBound === bound) return
+    reset()
+    sessionId = nextId
+    bound = nextBound
+    if (!bound) return
+    const owner = bound
+    let target = null
+    const pull = () => {
+      if (disposed || owner !== bound) return
+      try {
+        const snapshot = target?.getSnapshot?.()
+        // Never infer a completed turn from an intermediate finished tool step.
+        if (!snapshot?.timeline?.turns?.get) {
+          store.clear()
+          return
+        }
+        store.set(
+          turnDurations(snapshot.legacy?.nodes, {
+            turns: snapshot.timeline.turns,
+            openTurn: owner.openTurn?.getSnapshot?.(),
+            partial: snapshot.legacy?.partial,
+          }),
+        )
+      } catch {
+        store.clear()
+      }
+    }
+    try {
+      target = owner.target('chat')
+      targetOff = target.subscribe?.(pull) ?? (() => {})
+      openOff = owner.openTurn?.subscribe?.(pull) ?? (() => {})
+      pull()
+    } catch {
+      reset()
+    }
+  }
+  let observer = null
+  if (typeof view.MutationObserver === 'function' && doc.documentElement) {
+    observer = new view.MutationObserver((records) => {
+      if (disposed) return
+      const relevant = records.some((record) => {
+        if (record.type === 'attributes')
+          return (
+            record.target === occurrence || record.target?.matches?.(selector)
+          )
+        if (occurrence && !occurrence.isConnected) return true
+        return [...(record.addedNodes ?? [])].some(
+          (node) => node.matches?.(selector) || node.querySelector?.(selector),
+        )
+      })
+      if (relevant) bind()
+    })
+    observer.observe(doc.documentElement, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['data-conversation-session'],
+    })
+  }
+  try {
+    listOff = sessions?.list?.subscribe?.(bind) ?? (() => {})
+  } catch {
+    /* DOM events remain sufficient */
+  }
+  bind()
+  return () => {
+    disposed = true
+    observer?.disconnect()
+    safeOff(listOff)
+    reset()
   }
 }

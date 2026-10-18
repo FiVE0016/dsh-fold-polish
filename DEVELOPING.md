@@ -1,261 +1,64 @@
-# 开发与实现笔记
+# 实现说明（1.0）
 
-面向要改这个插件的人。**功能说明请看 [README.md](README.md)**，这里只放实现细节、兼容性、开发流程与踩过的坑。
+## 模块
 
-## 动手之前必须先读这个
+- `fold.js`：设置验证、旧偏好迁移、折叠策略。默认双方 3 行，统一折叠优先于最新轮展开。
+- `browser.js`：正文预览、步骤状态、全文索引、Range 定位、输入框与视口保持。
+- `client-entry.js`：DSH 单文件客户端注册与独立可选功能生命周期。
+- `rightbar.js`：布局 store、局部观察和可撤销的第三列宽度规则。
+- `turn-timer.js`：订阅当前会话快照，聚合可靠的已结束轮耗时。
+- `settings-panel.js` / `find-panel.js`：React 面板，不拥有宿主正文状态。
+- `delete-panel.js`：原生对话菜单、独立确认框及删除后的列表和选择同步。
+- `delete-host.js`：服务端按对话身份删除本地历史，不接受客户端文件路径。
+- `scripts/build.mjs`：无依赖构建器。客户端模块从同一清单生成 registry，React 和原生控件交给宿主 resolver；服务端文件不进客户端构建。
 
-> ### 📌 [docs/回归检查清单.md](docs/回归检查清单.md) —— 老 bug 专项
->
-> 这个插件的 bug **反复复发**（右栏收起不回弹复发过一次、折叠胶囊键消失复发过一次、
-> 测试全绿但真机坏过两次）。清单里把每一条历史事故的**症状、根因、现在的防线、
-> 对应测试**都写明了。
->
-> **改完代码必须做三件事**：
->
-> 1. `node scripts/regression-check.mjs` —— 逐条把清单里的防线变成断言，**全绿才算过**
->    （加 `--fast` 可跳过需要无头 Chrome 的那一项）
-> 2. `node test/probe-natural-browser.mjs` —— 真实浏览器专项（测量逻辑改动后必跑）
-> 3. 逐条过一遍清单，确认这次改动没有拆掉任何一道防线
->
-> 还有一条最容易被忘的：**改了 `src/` 必须 `node scripts/build.mjs` 重建 `client.js`**
-> —— 宿主加载的是 `client.js`（构建产物），不是源码。2026-10-13 有一整轮修复因为
-> 忘了这一步而完全没生效。
+## 正文
 
-## 先读这条：启动安全（踩过一次大坑）
+保留 React 拥有的原始父子关系、原始文本和组件；不得把原正文搬入自建 wrapper。折叠使用原节点的私有属性及 `hidden="until-found"`，旁边放可丢弃的呈现预览，展开即恢复原文。关闭插件和 dispose 清除自己的节点，恢复自己改过的 hidden/style。
 
-这个插件的客户端行是 `dsh.client.immediately: true` —— **它属于启动图，`apply()` 抛错会让整个 DSH 起不来**，用户看到的是崩溃对话框：
+行数来自屏幕外预览的文字 Range 矩形。媒体和块间距不参与预算，图片出现在文字前后都完整保留。文本节点在第 N 个文字行末截断，空段落被清除；`picture/source/img` 作为媒体整体保留。图片点击代理到原图节点；会创建独立上下文或不能可靠复制的组件让该消息保持原样。
 
-```
-web boot: 1 entry did not activate
-dsh-fold-polish: failed
-```
+预览、按钮和测量节点都有 `data-lf-owned`。正文发现、全文搜索、变更观察、图片 load 都排除这些节点，防止把预览当原文或因克隆 load 形成重建循环。内容指纹包含完整正文、宽度和字体，支持等长编辑；原图片加载、字体完成和会话列宽变动会重新测量。
 
-诊断日志：`%APPDATA%\@deepseek-ai\dsh-desktop\logs\crash-<时间>-web-boot.log`。
+使用帧内预算处理消息队列。滚轮输入期间推迟自动折叠；点击展开保留当前可见消息位置，点击收起以按钮位置补偿内容高度变化。补偿是相对视口差值，不能跳到会话顶部或尾部。
 
-已经踩过的两次：
+## 步骤与宿主契约
 
-1. **受限 ctx 只用 `ctx.get(name)`**。属性访问未声明的服务（例如 `ctx.sidebarRightTabs`）会**直接抛错**，不是返回 `undefined`。查服务一律 `try { ctx.get(name) } catch { null }`。
-2. **`apply` 已包一层外层 try/catch**（`apply` → `plugin.applyRow`），任何异常都只降级停用插件，不再拖垮应用。别把这层删了。
+步骤内容状态与开关布局分开记录：`stepState` 控制每块内容，`turnSpread` 控制一轮开关是否摊开。多块轮次初始合并时内容也收起；双箭头先摊开开关，单箭头控制本块，第三个按钮控制全部内容，双箭头收回内容与开关。单块轮次直接切换内容。查找命中将该轮开关摊开并打开命中块，后续扫描不能再次把它收回。默认 26px 圆形图标，可选 24px 文字胶囊；正文保留带箭头的胶囊。
 
-铁律：**改完 `src/client-entry.js` 必须先跑 `node test/entry.test.mjs` 与 `node test/runtime.test.mjs` 通过，再让用户重启**（`test/entry.test.mjs` 里有一条"敌意 ctx"用例专门守这条线）。
+验证来源：本机 DSH 0.2.1-rc.2 的 `dsh-client-ui-chat`、`dsh-client-ui-conversation`、`dsh-client-ui-layout`。
 
-## 折叠控件挂在哪儿、由谁来折
+- `[data-chat-flow-kind="user"]` 的 stack 先有附件，再有正文气泡；忽略附件与插件节点。
+- `assistant-step` 的 AssistantMarkdown root 首个**非插件**子节点为正文。`data-turn-process-answer` 可以是真实最终回复，不能据此排除正文。
+- `[data-step-process]` 只含工作步骤；主回复位于组外。内联过程成员有 `data-turn-process-member`。
+- 过程成员在整轮结束时可能原地转成主回复。更新 block.items 前必须恢复离开该步骤块的旧成员，并观察所有角色属性变化。
+- 自动折叠仅设置自己的隐藏标记。显式展开时只点组头/轮次摘要的原生 disclosure，不展开工具详情，也不在每次扫描重新打开用户关过的详情。
+- 输入手柄插到 `[data-composer-card]` 首位，绝对定位在顶部边缘，不占 flex 布局空间。宿主 card 自带 `gap:12px`，不能在工具栏后增加占位子项，否则按钮底下会多出手柄高度及一份 gap。保持工具栏原生底部 padding；不插到 contenteditable、占位 slot 或 dock 中。
 
-每条**折叠的**消息下方一个气泡胶囊键；每一段工作步骤一个折叠缝。
+## 查找
 
-| 位置 | 控件 | 作用范围 |
-|---|---|---|
-| 每条折叠的消息下方 | 气泡胶囊（`▾ 展开我的输入 · 还有 12 行` / `▾ 展开全文 · 还有 30 行`，展开后变 `▴ 收起`） | 只这一条消息 |
-| 工作步骤与后面那条回复之间 | 一条横线上的圆形键（单箭头图标） | 这一段里的全部工作步骤 |
-| **同一轮最后一条缝**（主按钮，默认每轮只有它） | 双箭头键（`展开全部` / `收起全部`） | 这一轮的**缝**（版面）：展开全部 = 摊开各条缝、内容仍收起；收起全部 = 内容全收 + 回到只剩这一个按钮 |
-| **同一轮最后一条缝**（仅摊开时出现） | 箭头+横线键（`展开所有步骤` / `收起所有步骤`） | 这一轮**所有段的内容**，缝的数量不动 |
+索引原正文与步骤的 text nodes，排除自己的控件与预览。每个匹配保留真实节点、字符偏移和稳定 handle，不只记整个消息。揭示时展开插件块及原生隐藏祖先，在宿主更新后用 Range 定位，并用 CSS Highlights 标出命中。没有全局快捷键和轮询。
 
-三个控件一个几何、一层视觉：文字关掉时各自是一个 26px 圆形图标键（三个图标不同，不看文字也能区分）；文字打开时按钮本身变成胶囊、内层图标去掉边框/背景/阴影（`[data-lf-text="1"] [data-lf-icon]`），所以不会出现"胶囊里套圆圈"。
+## 删除本地对话
 
-"缝"是插件插入的**一条线**（`[data-lf-step-line]`：两侧细线 + 线上的控件）。线上的单箭头键（`[data-lf-step-toggle]`）管自己那一段；只有一轮的**最后一条缝**才携带主按钮（`[data-lf-step-all]`）与"所有步骤"键（`[data-lf-step-every]`）。状态是会话级的：
+`sidebar.workspaces.session.menu.item` 提供原生菜单项，`shell.overlay` 独立持有确认框。确认前不发删除请求；确认后通过已有 connection RPC 载体调用 `foldPolish/deleteConversation`，参数只有对话 ID。服务端仅接受 owner 调用，并在后端重新检查任务、会话占用和持久化格式。禁止接收客户端文件路径或递归删除工作目录。
 
-- `mergedTurns` = 状态 0（只留一个按钮）：同步时对该轮的块强制保持折叠（宿主重渲染把开关复位也会折回），并隐藏除最后一条外的所有缝与它自己的单箭头；
-- 摊开（状态 1/2）：主按钮变成 `收起全部`，"所有步骤"键按 `info.openCount === info.count` 在 `展开所有步骤` / `收起所有步骤` 之间切换；
-- 单块轮次没有"摊开"可言：它的主按钮直接等于那一段自己的开关（文案 `展开全部` / `收起全部`，点击即开合）。
-- 点过的块记进"读者手动操作过"集合，自动折叠不会再碰它。
+删除模块按本机 DSH 0.2.1-rc.2 的 JSONL、Cordis、会话和缓存契约核对。宿主没有公开的完整删除 API；关闭已打开对话需要精确匹配该轮生命周期的 effect，无法确认时拒绝删除。格式或宿主契约变更后应先重新验收，不能放宽校验强行删除。服务端相关依赖采用独立注入，不能让删除能力缺失影响显示功能。
 
-工作步骤由谁来折，取决于宿主当前的工作详情模式 —— 两种都由同一个折叠缝驱动：
+只处理独立目录中的 canonical session generation 文件，未知文件、附件、工作目录和子对话保持原样。删除使用 prepared/committed 日志：提交前失败回滚记录和目标归属；提交后清理失败保留恢复标记并向界面返回 `cleanupPending`。重新加载时处理该模块自己的未完成操作。测试只使用临时生成的记录，不连接真实会话删除接口。
 
-| 宿主渲染方式 | 折叠缝做什么 |
-|---|---|
-| **分组模式**（工作详情 compact / standard，以及 detailed 的已结束轮） | 步骤被包在 `[data-step-process]` 容器里，容器自带标题开关。折叠缝点击宿主自己的开关（以及各轮的 `[data-turn-process]` 摘要行），状态完全归宿主，连它自己的标题箭头都同步 |
-| **内联模式**（工作详情 verbose，宿主不提供开关） | 宿主的摘要行是 `disabled`、步骤全部展开。此时折叠缝自己把这串行折起来：在这些行上打私有属性 `data-lf-step-folded` **并设 `hidden="until-found"`**（纯显示层，插件一关或卸载，行立刻全部回来）。用 until-found 而不是 `display: none` 是为了让浏览器搜索够得着：命中时会触发 `beforematch`，插件据此把整段打开 |
+## 宿主与计时
 
-搜索的两条路径：
+根插件没有硬服务依赖，各独立功能由 Cordis `ctx.inject` 跟踪服务出现/消失；`ctx.get` 读取服务。所有可选功能安装失败均局部降级，不能让立即启动的客户端行抛错。
 
-- **折叠的消息正文**：限高盒是 `overflow-y: auto`（滚动条隐藏）。浏览器揭示搜索结果的方式就是滚动它所在的滚动容器，所以插件在正文的 `scroll` 事件里直接把这条消息展开——`scrollTop > 0` 只可能来自"有人想读被折掉的部分"。
-- **折叠的步骤**：`hidden="until-found"` / 宿主自己的 `content-visibility: hidden` 都会被浏览器搜索命中（`display: none` 不会）。`beforematch` 处理器按块边界找到那一行所属的整段，走宿主开关或清掉插件自己的标记，并把它记入"读者手动操作过"集合，避免自动折叠立刻把它折回去。
+`uiConversation.binding(sessionId).target('chat')` 有 `subscribe`。读取当前 DOM 会话的 `timeline.turns` 与 `legacy.nodes`；只有 closed 轮次聚合最早 `stepStartTime` 到最后 `completedTime`。不能把一个工具步骤结算当整轮完成，也不能从会话目录猜一个历史 session。订阅在会话切换/插件停用时释放。
 
-折叠缝上的箭头与提示跟随当前状态切换；**读者手动点开过的那一段不会再被自动收起**（自动折叠只在某段第一次出现时发生一次）。
+右栏只定位 `[data-rightbar-col]` 的 AppFrame。规则带 collapsed/fullscreen 排除条件，关栏后立即无效。布局订阅和局部观察处理重挂载；不使用整页定时扫描。禁用/dispose 撤销规则并恢复原宿主宽度。
 
-## 宿主设置页
+## 验证
 
-插件注册一个 `settings.plugins.tab` 贡献（`id: "bubble-fold", order: 20, label: "UI 美化"`）：在 **设置 → 插件** 页与内置"全部"tab 并列。宿主只画 tab 条与外壳，页面内容由 `src/settings-panel.js` 的 React 组件（纯 `createElement`，无 JSX）绘制；组件通过注册项的 `inject: () => ({ api })` 拿到 `{ settings(), update(patch), subscribe(fn) }`，与 DOM 层控制器写通。控制器 `subscribe` 是浮层面板与设置页双向同步的通道。`apply(ctx)` 里若 `ctx.slots` 缺失（旧宿主）则整体跳过注册，折叠功能不受影响；`inject: ['slots']` 是为此新增的唯一依赖声明。面板样式在插件自己的样式表里，且**不套 `[data-dsh-fold-polish]` 作用域**——插件被自己的开关关掉时，设置页仍要能正常显示并把它开回来。
+先 `npm run build`，再 `npm test`、`npm run test:browser`。`client.js` 是宿主加载的文件，改 src 后必须同步。构建会验证输出可解析，Node 测试还检查实际 bundle registry 与启动隔离。
 
-## 右侧栏「查找」
+浏览器测试执行实际控制器，覆盖默认值、真实行数、图片布局、滚轮、长文末尾收起、步骤角色转换、搜索 Range、等长更新、输入框拖拽、右栏回弹、耗时唯一、空闲稳定性及 dispose。旧版复制测量函数和大量 fake DOM 几何断言已替换；旧版诊断 API 不作为 1.0 接口。
 
-查找是**右侧栏的一个 tab**（与宿主自带的"上下文""文件"同列），而不是左侧栏面板或浮动条。tab 由三处注册组成，**共用同一个 id**（`bubble-fold-find`），这正是宿主自带面板（`dsh-context`、`ui-schedule`）的形态：
-
-| 注册 | 座位 | 作用 |
-|---|---|---|
-| tab 类型 | `ctx.sidebarRightTabs.register({ id, kind: id, title })` | 让右栏知道存在这个 tab（`title` 传函数以便跟随语言） |
-| 面板体 | `slots.register({ name: 'sidebar.right.pane.tab', key: id, inject: () => ({ api }) }, Panel)` | 按 id 分派的 tab 内容 |
-| 标题 chip | `slots.register({ name: 'sidebar.right.pane.tab.title', key: id }, Title)` | tab 条上的文字 |
-
-打开方式：用户在右栏 tab 列表里点开（2026-10-13 起不再有 `Ctrl + F` 键盘入口——插件不注册任何全局快捷键）。真浏览器里折叠内容通过 until-found 对原生查找可见。搜索与揭示逻辑在 DOM 层（`controller.search` / `controller.revealAt`），面板只是它的 React 外壳。
-
-## 右侧栏宽度（怎么设、怎么读、为什么这么绕）
-
-设置项 `rightbarRatio`（30–70%，默认 45%）。这条链路绕，是因为宿主的宽度语义和它公开的接口都不直观——**下面每一条都是在真机上验证/被坑出来的**：
-
-| 事情 | 结论 |
-|---|---|
-| `ctx.layout` 是什么 | 一个 `LayoutController` 实例，字段只有 `panels` / `hasMainPanel` / `panelInfo` / `navigation`。**没有** `layoutInfo`，**没有** `layout.setRightbar` |
-| 设宽度 | `layout.panels.setRightbar(px)`（`panels` 是 store 的**已绑定** actions）。**必须先** `layout.panels.setViewportWidth(真实帧宽)`：store 启动时 `viewportWidth` 可能是 0，它按自己的值钳位 → `clampWidth(px, 300, max(300, 0))` 恒等于 300，写进去以后宿主的 45% 默认值也不会再补（`rightbar ??=` 只在 null 时生效） |
-| 为什么设了还是不变宽 | 宿主把右栏那一列写成 **`minmax(0px, max)`**，格子按**内容**定宽：往里传再大的"最大值"也撑不宽面板 |
-| 真正的办法 | 插件自己写一条带 `!important` 的样式规则把第三列钉到目标像素（另外两列从宿主内联样式原样复制）。内联样式打不过 `!important`，于是宽度归我们；折叠（`data-rightbar-collapsed`）与全屏（`data-rightbar-fullscreen`）是呈现状态，检测到就撤规则 |
-| 怎么读宽度 | 服务没有 getter。AppFrame 是**唯一**被写了**内联** `grid-template-columns` 的元素（按这个特征定位），宽度取内联里最后一个 `minmax(0px, Npx)` 的 N——宿主自己的原始意图。从子元素往上找"第一个 grid"会命中内部 grid，读到无关数字（这条坑了一整轮） |
-| 收起 / 全屏 / 第三列为 0 | **必须撤掉规则**：否则宿主关闭右栏后，那一列仍被 `!important` 占着，会话区卡在半宽。重新打开时再按设置恢复；插件总开关关闭时同样撤掉 |
-| 拖动怎么联动 | 宿主拖手柄时会用**它自己的数字**重渲染内联 grid。我们把该数字与"刚写进去的值"比较：不同、且不在刚应用后的 800ms 内 → 采纳为新占比并重写规则。这个 800ms 门闩是必需的，否则我们自己的应用会被当成拖动、把设置改写成测量值（也坑过一轮） |
-
-自检：`rightbar()` 同时给出 `ratio`（宿主意图）与 `renderedRatio`（实际渲染），两者的差值就能指出"是没设进去"还是"被别的样式压过"。
-
-## 输入框高度
-
-宿主把输入区限制在 `--dsh-composer-text-max-height`（默认 336px），超出后内部滚动。
-
-- 0.6.x 只抬高这个上限：内容短的时候，拖拽看不出任何变化（这就是"调节器不起作用"的原因）。
-- 0.7.0 起插件在输入框卡片顶部加一条拖拽手柄，手动模式会同时**钉住输入区的实际高度**，所以拖拽跟手。
-- 0.8.0 修正方向（手柄在顶边：向上=拉高）。
-
-高度存在 `dsh.bubble-fold.composer-height`，重启后保留。手柄是卡片里的普通 flex 元素（`order: -1` 固定在最上），不是浮动覆盖层，不会挡住输入框或发送按钮。宿主的引导弹窗（预览版说明 / 添加 API Key）是 `aria-modal` 全屏遮罩，打开时会挡住弹窗下方的一切（包括手柄）—— 这是宿主行为，关掉弹窗即可。
-
-输出宽度用宿主自带的左右拖拽手柄，本插件不提供宽度功能。
-
-## 控制台 API
-
-```js
-__DSH_BUBBLE_FOLD__.settings()               // 看当前设置
-__DSH_BUBBLE_FOLD__.update({ userLines: 3 }) // 改一项
-__DSH_BUBBLE_FOLD__.rescan()                 // 强制重扫
-__DSH_BUBBLE_FOLD__.stats()                  // 性能计数器（见下）
-__DSH_BUBBLE_FOLD__.dispose()                // 临时停用并还原 DOM
-__DSH_BUBBLE_FOLD__.status                   // 'running' | 'failed'
-// 右栏宽度与输入框高度这两个"跟宿主纠缠"的功能各带自检：
-__DSH_BUBBLE_FOLD__.rightbar()               // { supported, ratio, renderedRatio, viewport }
-__DSH_BUBBLE_FOLD__.layoutDebug()            // layout 服务的真实形状（keys / panels / setRightbar 类型）
-__DSH_BUBBLE_FOLD__.layoutTry(60)            // 真机实验：普查所有三列 grid，调一次 setRightbar，再普查一遍
-__DSH_BUBBLE_FOLD__.dragLog()                // 最近几次输入框拖拽：基准值/来源/applied/一帧后实测
-__DSH_BUBBLE_FOLD__.composer()               // { min, max, value, fallback, manual }
-```
-
-`test/diagnose.js` 是一段可直接贴进页面控制台的自检片段，会打印宿主的步骤布局、容器/成员行数量与插件状态，排查"为什么不折"时先跑它。
-
-### 浏览器环境怎么测
-
-`test/browser-check.mjs` 是**浏览器验收检查**：它对一个正在运行的 `dsh --profile web` 界面开无头 Chrome，验证只有真浏览器才能证明的事——插件从**已安装的包**里跑起来（不是源码）、真实会话能折叠、`Ctrl+F` 交还给浏览器原生查找、打印媒体下内容完整、以及右栏收起时**没有**被 `!important` 规则占着那一列。
-
-```sh
-dsh --profile web                     # 打印 http://127.0.0.1:<port>/?token=...
-node test/browser-check.mjs "http://127.0.0.1:3080/?token=..."
-```
-
-会话为空时它会明确 SKIP 掉折叠相关的项并提示你先打开一个有内容的会话。它不是 CI 的一部分（需要真实应用在跑）。
-
-`test/live-probe.mjs` 会开一个无头 Chrome 连上**正在运行**的界面并自动跑上面这些自检（`node test/live-probe.mjs`）。注意 `dsh web` 需要 URL 里的令牌，缺令牌时它只能看到鉴权页。
-
-## 性能：为什么它必须"懒惰"
-
-长会话可以有 1000+ 个 flow item。这条链路里每一步都很贵：读 `scrollHeight` 会触发**强制同步重排**，而写属性会触发插件自己的 MutationObserver。
-
-`__DSH_BUBBLE_FOLD__.stats()` 会告诉你实情：
-
-| 字段 | 含义 | 健康表现 |
-|---|---|---|
-| `scans` | 扫描次数 | 空闲时应停止增长 —— 持续增长就是自我喂养的循环 |
-| `measured` | 本轮真正做过布局测量的行数 | 应远小于总会话行数 |
-| `selfMutations` | 由插件自己节点触发的变更 | 一次折叠后应停止增长 |
-
-为此有三道闸门，删任何一个都会让界面变卡：
-
-1. **写入幂等** —— 值没变就不碰 DOM，否则自己的写入会触发自己再扫一次，形成 60fps 永不停止的循环
-2. **视口闸门** —— 只处理屏幕附近（上下各一屏）的消息与步骤段；滚入视口时再折
-3. **每帧 4ms 预算**（`SCAN_BUDGET_MS`）—— 超时就 `requestAnimationFrame` 续做，绝不在一帧里处理上千行
-
-实测（真实 Chrome，1200 条消息的会话）：空闲 4 秒 0 次扫描；强制扫描一次 2.1ms，只测 28 行。
-
-## 实现方式与它的代价
-
-纯客户端插件（`index.js` 是无副作用的空壳，只为让 bundle 被加载）。折叠靠两条东西：
-
-1. **宿主 DOM 契约属性**：`data-chat-flow-kind="user" | "assistant-step" | "turn-process"`、`data-chat-anchor-key`、`data-chat-turn`、`data-streaming`、`data-turn-process*`、`data-step-process*` 等，加结构下钻找正文/步骤本体。**不依赖 CSS Module 的哈希类名**，宿主换皮不会失效。
-2. **只动样式与自有节点**：限高走 `max-height` 变量 + 私有属性选择器；注入的控件挂在 React 托管范围之外，React 重渲染时不参与 diff（位置在每次扫描时幂等校正）。
-
-⚠️ 诚实说明代价：这仍是一条 DOM 契约路线。DSH 升级若改了上面那些 `data-*` 的含义，折叠会失效 —— 但失效方式是"不折了"，而不是弄坏会话：设置里关掉插件或直接卸载，DOM 立刻回到原生状态。这也是没有 fork 宿主渲染器的原因（那样更彻底，但每次宿主升级都要重新适配）。
-
-## 兼容性
-
-- 宿主：`@deepseek-ai/dsh` 0.2.0-rc.2（契约按这个版本核对，见 `src/browser.js` 顶部注释）
-- 与 DSH 原生「工作步骤展示」、过程折叠、右缘 TurnNavigator 互不干扰（不同 DOM 区域）
-- 与 `dsh-thought-fold` 同时装没有冲突（它折过程包封，本插件显式跳过包封内部）
-
-### `dsh.client.immediately` 不能删
-
-`package.json` 里这一行是**必需**的：
-
-```json
-"dsh": { "client": { "platform": "web", "immediately": true, "inject": [] } }
-```
-
-客户端 bundle 走宿主的启动图（`window.__DSH_BOOT__`），而只有被标记 `immediately` 的行、或被其他模块请求的行才会被执行。本插件是纯 DOM 插件，不向任何 slot 注册组件，因此没有任何东西会"请求"它 —— 去掉 `immediately` 后 bundle 仍会被投递但永不执行，表现就是控制台里 `__DSH_BUBBLE_FOLD__` 为 `undefined`、界面上什么都不发生（0.1.0 正是这样失败的）。
-
-`inject` 留空同样是故意的：列 UI 模块只为排序激活，本插件不依赖任何客户端服务。
-
-## 结构
-
-```
-index.js                  宿主侧空壳（注入服务为空，无副作用）
-client.js                 构建产物：浏览器半，由宿主模块加载器投递
-cordis.patch.yml          bundle 补丁：把 bubble-fold 行插进平台树
-src/fold.js               纯逻辑（设置归一化、限高计算、折叠判定）—— 可在 plain Node 下测
-src/browser.js            DOM 运行时（扫描、包裹、控件、设置面板、快捷键、输入框手柄）
-src/client-entry.js       ModuleLoader 入口 + 宿主集成（设置页 tab、右栏查找 tab、右栏宽度）
-src/settings-panel.js     宿主设置页的 React 组件（与浮层面板一一对应）
-src/find-panel.js         右栏「查找」tab 的 React 组件
-scripts/build.mjs         把上面这些文件打包成单文件 client.js
-tools/make-demo-gif.py    用 Pillow 把两张截图合成 README 用的 demo.gif
-test/fold.test.mjs        纯逻辑单测（21 项）
-test/runtime.test.mjs     运行时、交互与真实 client.js 构建产物的加载测试（101 项）
-test/entry.test.mjs       入口契约：注册、右栏宽度、敌意 ctx 不崩（15 项）
-test/visual-fixture.html  宿主样式的可视化夹具（两轮对话 / 步骤串 / 两种步骤布局）
-test/visual-check.mjs     真实 Chrome 里跑夹具：折叠状态、几何、点击行为 + 生成 assets/ 截图
-test/live-probe.mjs       连正在运行的界面跑自检（需要 dsh web 的令牌）
-test/diagnose.js          排查用：贴进页面控制台，打印宿主模式与插件状态
-assets/                   README 里的截图与 demo.gif（截图由 test/visual-check.mjs 生成）
-.github/workflows/test.yml CI：构建同步检查 + 三套测试（不需要浏览器与网络）
-```
-
-## 开发
-
-```sh
-node scripts/build.mjs            # 重新打包 client.js
-node scripts/build.mjs --check    # 检查 client.js 是否与源码同步
-node test/fold.test.mjs           # 纯逻辑
-node test/runtime.test.mjs        # DOM 与交互（不需要浏览器）
-node test/visual-check.mjs        # 真实 Chrome 渲染检查（需要本机 Chrome，同时刷新 assets/ 截图）
-```
-
-改完 `src/` 必须重新构建：宿主加载的是 `client.js`，不是 `src/`。**提交前把 `client.js` 一并提交** —— 它才是真正跑起来的东西，CI 会检查它与源码是否同步。
-
-### 三个已经踩过的坑
-
-1. **`index.js` 必须能被 `import()` 解析。** 它是 ESM 入口，宿主用裸 `import()` 加载。0.1.0–0.1.3 在这里失败过：文件开头写成了 Python 风格的 `#` 注释 —— 第一行被 Node 当成 shebang 跳过，第三行直接是语法错误，于是宿主报 `bubble-fold (dsh-fold-polish): failed to import`，宿主半不存在 → 客户端 bundle 也就永远不会被执行。改完务必跑一次导入自检：
-
-   ```sh
-   node -e "import('./index.js').then(m=>console.log('OK',Object.keys(m)))"
-   ```
-
-2. **`factory` 不能声明 `require` 参数。** 宿主这样调用 bundle：
-
-   ```js
-   registration.factory(specifier => { /* 只认 react 等平台模块，其余全部抛错 */ })
-   ```
-
-   `build.mjs` 在 IIFE 作用域上提供了自己的 `require`（先查本地模块表，兜不住才落到宿主）。一旦写成 `factory: (require) => {…}`，这个参数会遮蔽包内的 `require`，于是 `require('./src/browser.js')` 跑到宿主模块表里去要，直接炸：
-
-   ```
-   dsh-fold-polish: import failed: client-modules: require("./src/browser.js") missed the module table
-   ```
-
-   桌面端会把它显示成「应用无法启动」对话框（0.1.5 的现象）。正确写法是 `factory: () => {…}`。`test/runtime.test.mjs` 用**只认 `react` 的严格替身**调用 factory，这类遮蔽会被测试直接抓住。
-
-3. **别用 PowerShell 的 `Set-Content -Encoding UTF8` 改 `package.json` / `client.js`。** Windows PowerShell 5.1 会写入 BOM，Node 的 `JSON.parse` 直接报 `Unexpected token '\uFEFF'`。用 Node 脚本改：
-
-   ```sh
-   node -e "const fs=require('fs');fs.writeFileSync('package.json', fs.readFileSync('package.json','utf8'))"
-   ```
+控制台保留 `window.__DSH_FOLD_POLISH__`（同 `__DSH_BUBBLE_FOLD__`），提供 settings/update/search/revealAt/composer/rightbar/turnTimer/rescan/dispose。
