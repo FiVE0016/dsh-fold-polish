@@ -174,6 +174,9 @@
        gap below the toolbar and makes its buttons float above the card's bottom. */
     [data-lf-composer-handle] { position:absolute; top:-5px; left:50%; transform:translateX(-50%); z-index:2; display:flex; align-items:center; justify-content:center; width:72px; height:16px; min-height:0; cursor:ns-resize; touch-action:none; border:0; background:transparent; color:inherit; padding:0; margin:0; }
     [data-lf-composer-handle]::after { content:''; display:block; width:34px; height:3px; border-radius:4px; background:color-mix(in srgb,currentColor 30%,transparent); }
+    /* Both sticky insets keep the seat at the scrollport's bottom even while an
+       expanding session view still reports its previous, shorter layout height. */
+    [data-conversation-scroll]:not(:has([data-conversation-composer-overlay])) > [data-lf-composer-docked] { top:var(--lf-composer-top); }
     [data-lf-setting] { display:flex; flex-direction:column; gap:4px; padding:18px; color:inherit; }
     [data-lf-setting-intro] { margin-bottom:16px; opacity:.65; font-size:13px; line-height:1.6; }
     [data-lf-setting-row] { display:flex; align-items:center; justify-content:space-between; gap:20px; padding:12px 0; border-bottom:1px solid color-mix(in srgb,currentColor 9%,transparent); }
@@ -863,7 +866,7 @@
                 if (!row.isConnected || !live.has(row)) release(record)
               renderSteps(list)
               renderTimers(list)
-              composer.sync(settings.enabled && settings.composerResize)
+              composer.sync(settings.enabled, settings.composerResize)
             }
             if (now() - lastInput > 180 || !settings.enabled) {
               const started = now()
@@ -918,6 +921,8 @@
             'data-chat-flow-kind',
             'data-chat-turn',
             'data-conversation-session',
+            'data-content-phase',
+            'data-phase',
             'data-streaming',
             'data-turn-process-member',
             'data-turn-process-hidden',
@@ -925,6 +930,7 @@
             'data-turn-process-inline',
             'hidden',
             'aria-expanded',
+            'contenteditable',
             'class',
             'style',
             'src',
@@ -932,7 +938,7 @@
           ],
         })
       }
-      const composer = createComposer(doc, view, notify)
+      const composer = createComposer(doc, view, notify, () => schedule(true))
       const resize = new view.ResizeObserver(() => schedule(true))
       resize.observe(doc.documentElement)
       const resized = (event) => {
@@ -1226,13 +1232,16 @@
       }
     }
 
-    function createComposer(doc, view, changed) {
+    function createComposer(doc, view, changed, reflow) {
       const cards = new Map(),
-        saved = new Map()
+        saved = new Map(),
+        observed = new Set()
       let height = COMPOSER_DEFAULT,
         manual = false,
         drag = null,
-        enabled = false
+        enabled = false,
+        resizable = false
+      const resize = new view.ResizeObserver(reflow)
       try {
         const value = Number(view.localStorage.getItem(COMPOSER_STORAGE_KEY))
         if (value >= 32 && value <= 1400) {
@@ -1252,41 +1261,167 @@
             node.style.getPropertyPriority(key),
           ])
       }
-      const write = (node, key, value) => {
+      const write = (node, key, value, priority = '') => {
+        if (
+          node.style.getPropertyValue(key) === value &&
+          node.style.getPropertyPriority(key) === priority
+        )
+          return
         remember(node, key)
-        node.style.setProperty(key, value)
+        node.style.setProperty(key, value, priority)
       }
-      const restore = () => {
-        for (const [node, props] of saved)
+      const restore = (target, keys) => {
+        for (const [node, props] of saved) {
+          if (target && node !== target) continue
           for (const [key, [value, priority]] of props) {
+            if (keys && !keys.includes(key)) continue
             if (value) node.style.setProperty(key, value, priority)
             else node.style.removeProperty(key)
+            props.delete(key)
           }
-        saved.clear()
+          if (!props.size) saved.delete(node)
+        }
       }
+      const placement = ['position', 'top', 'bottom', 'left', 'width', 'box-sizing']
+      const editorSize = ['height', 'min-height', 'max-height']
+      const release = (card, record) => {
+        restore(record.seat)
+        record.reserve?.remove()
+        restore(card)
+        if (record.scroll) restore(record.scroll)
+        record.grip.remove()
+        record.seat.removeAttribute('data-lf-composer-docked')
+        record.seat.removeAttribute('data-lf-composer-recovered')
+      }
+      const viewportLimit = () =>
+        Math.max(32, Math.min(1400, view.innerHeight - 180))
       const info = () => ({
         height,
         manual,
         min: 32,
-        max: Math.max(72, Math.min(1400, view.innerHeight - 180)),
+        max: Math.min(
+          viewportLimit(),
+          ...[...cards.values()]
+            .filter((record) => record.visible)
+            .map((record) => record.limit ?? 1400),
+        ),
         default: COMPOSER_DEFAULT,
       })
       function apply() {
-        restore()
+        // Swap only fixed placement and its equal-height reservation. Keep editor
+        // sizing in place: clearing it before measuring briefly shrinks the native
+        // scroll range and can be mistaken for a return to the tail by the host.
+        for (const { seat, reserve } of cards.values()) {
+          if (reserve?.isConnected) {
+            restore(seat, placement)
+            reserve.remove()
+            seat.removeAttribute('data-lf-composer-recovered')
+          }
+        }
         if (!enabled) return
-        for (const [card, { seat }] of cards) {
+        for (const [card, record] of cards) {
+          const { seat } = record
+          const scroll = card.querySelector('[data-input-scroll]')
+          if (record.scroll !== scroll) {
+            if (record.scroll) restore(record.scroll)
+            record.scroll = scroll
+          }
+          const root = seat.parentElement?.matches('[data-conversation-scroll]')
+            ? seat.parentElement
+            : null
+          const bounds = root?.getBoundingClientRect()
+          record.visible =
+            card.getClientRects().length > 0 && (!bounds || bounds.height > 0)
+          if (!record.visible) continue
+          const available = bounds
+            ? Math.max(
+                0,
+                Math.min(view.innerHeight, bounds.bottom) - Math.max(0, bounds.top),
+              )
+            : view.innerHeight
+          const chrome = scroll
+            ? Math.max(
+                0,
+                seat.getBoundingClientRect().height -
+                  scroll.getBoundingClientRect().height,
+              )
+            : 0
+          // Keep some conversation visible, including when an old preference was
+          // saved on a much taller display. Never overwrite that preference here.
+          record.limit = Math.max(
+            32,
+            Math.min(viewportLimit(), available - chrome - 64),
+          )
           // The host card already establishes this containing block. Keep the
           // fallback reversible for older composer layouts that are static.
-          if (view.getComputedStyle(card).position === 'static')
+          if (resizable && view.getComputedStyle(card).position === 'static')
             write(card, 'position', 'relative')
-          if (!manual) continue
-          const scroll = card.querySelector('[data-input-scroll]')
-          write(seat, '--dsh-composer-text-max-height', `${height}px`)
-          if (scroll) {
-            write(scroll, 'height', `${height}px`)
-            write(scroll, 'min-height', `${height}px`)
-            write(scroll, 'max-height', `${height}px`)
+          else if (!resizable) restore(card, ['position'])
+          if (resizable && manual) {
+            const effective = Math.min(height, record.limit)
+            write(seat, '--dsh-composer-text-max-height', `${effective}px`)
+            if (scroll) {
+              write(scroll, 'height', `${effective}px`)
+              write(scroll, 'min-height', `${effective}px`)
+              write(scroll, 'max-height', `${effective}px`)
+            }
+          } else {
+            restore(seat, ['--dsh-composer-text-max-height'])
+            if (scroll) restore(scroll, editorSize)
           }
+          const phase = seat.closest('[data-content-phase],[data-phase]')
+          const active =
+            (phase?.getAttribute('data-content-phase') ??
+              phase?.getAttribute('data-phase')) === 'active'
+          if (
+            root &&
+            active &&
+            !root.querySelector('[data-conversation-composer-overlay]') &&
+            view.getComputedStyle(seat).position === 'sticky'
+          ) {
+            write(
+              seat,
+              '--lf-composer-top',
+              `${Math.max(0, root.clientHeight - seat.getBoundingClientRect().height)}px`,
+            )
+            put(seat, 'data-lf-composer-docked', '1')
+          } else {
+            restore(seat, ['--lf-composer-top'])
+            seat.removeAttribute('data-lf-composer-docked')
+          }
+          if (
+            root &&
+            active &&
+            !root.querySelector('[data-conversation-composer-overlay]')
+          ) {
+            const pane = seat.closest('[data-conversation-content]')
+            const area = pane?.getBoundingClientRect() ?? bounds
+            const bottom = Math.min(view.innerHeight, area.bottom)
+            const top = Math.max(0, area.top)
+            const box = seat.getBoundingClientRect()
+            if (
+              box.height > 0 &&
+              box.height <= bottom - top &&
+              Math.abs(box.bottom - bottom) > 2
+            ) {
+              // Keep the original scroll owner, composer node and parent. Reserving
+              // exactly its height preserves the native history/follow scroll range.
+              record.reserve ??= ownNode(doc, 'div', 'data-lf-composer-reserve')
+              record.reserve.setAttribute('aria-hidden', 'true')
+              record.reserve.inert = true
+              record.reserve.style.cssText = `flex:0 0 ${box.height}px;height:${box.height}px;min-height:${box.height}px;margin:0;padding:0;border:0;pointer-events:none;overflow-anchor:none;`
+              seat.before(record.reserve)
+              write(seat, 'position', 'fixed', 'important')
+              write(seat, 'top', `${bottom - box.height}px`, 'important')
+              write(seat, 'bottom', 'auto', 'important')
+              write(seat, 'left', `${box.left}px`, 'important')
+              write(seat, 'width', `${box.width}px`, 'important')
+              write(seat, 'box-sizing', 'border-box')
+              put(seat, 'data-lf-composer-recovered', '1')
+            }
+          }
+          put(record.grip, 'aria-valuemax', record.limit)
+          put(record.grip, 'aria-valuenow', Math.min(height, record.limit))
         }
       }
       function setHeight(value, floor = 32) {
@@ -1308,13 +1443,20 @@
         apply()
         changed()
       }
-      function sync(on) {
+      function sync(on, allowResize) {
         enabled = on
+        resizable = on && allowResize
         const wanted = new Set()
         if (on)
           for (const seat of doc.querySelectorAll('[data-composer-seat]')) {
-            const input = seat.querySelector('[contenteditable="true"],textarea')
+            // The native editor stays mounted while submitting or busy, but switches
+            // contenteditable to false. Its editing state must not remove the card
+            // from layout management or detach the reader's resize handle.
+            const input = seat.querySelector(
+              '[data-composer-input],textarea,[contenteditable]',
+            )
             const card =
+              seat.querySelector('[data-composer-card]') ??
               input?.closest('[data-composer-card]') ??
               [...seat.children].find((child) => child.contains(input))
             if (!card) continue
@@ -1329,20 +1471,36 @@
               grip.addEventListener('click', (event) => event.stopPropagation())
               record = { grip, seat }
               cards.set(card, record)
+              put(grip, 'aria-valuemin', 32)
             }
             if (
-              record.grip.parentNode !== card ||
-              card.firstElementChild !== record.grip
+              resizable &&
+              (record.grip.parentNode !== card ||
+                card.firstElementChild !== record.grip)
             )
               card.insertBefore(record.grip, card.firstChild)
-            put(record.grip, 'aria-valuemin', 32)
-            put(record.grip, 'aria-valuemax', info().max)
-            put(record.grip, 'aria-valuenow', height)
+            if (!resizable) record.grip.remove()
           }
         for (const [card, record] of cards)
           if (!wanted.has(card) || !card.isConnected) {
-            record.grip.remove()
+            release(card, record)
             cards.delete(card)
+          }
+        const targets = new Set()
+        for (const { seat } of cards.values()) {
+          targets.add(seat)
+          if (seat.parentElement?.matches('[data-conversation-scroll]'))
+            targets.add(seat.parentElement)
+        }
+        for (const node of observed)
+          if (!targets.has(node)) {
+            resize.unobserve(node)
+            observed.delete(node)
+          }
+        for (const node of targets)
+          if (!observed.has(node)) {
+            resize.observe(node)
+            observed.add(node)
           }
         apply()
       }
@@ -1384,7 +1542,9 @@
         if (!event.target.matches?.('[data-lf-composer-handle]')) return
         if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
           event.preventDefault()
-          setHeight(height + (event.key === 'ArrowUp' ? 20 : -20))
+          setHeight(
+            Math.min(height, info().max) + (event.key === 'ArrowUp' ? 20 : -20),
+          )
         }
         if (event.key === 'Home') {
           event.preventDefault()
@@ -1404,8 +1564,10 @@
         reset,
         dispose() {
           enabled = false
+          resize.disconnect()
+          observed.clear()
+          for (const [card, record] of cards) release(card, record)
           restore()
-          for (const { grip } of cards.values()) grip.remove()
           cards.clear()
           doc.removeEventListener('pointerdown', down, true)
           doc.removeEventListener('pointermove', move)

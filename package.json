@@ -1,6 +1,6 @@
 {
   "name": "dsh-fold-polish",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "DeepSeek Harness conversation polish: message and step folding, composer and sidebar sizing, folded-content search, turn timing, and confirmed local conversation history deletion.",
   "keywords": [
     "dsh",

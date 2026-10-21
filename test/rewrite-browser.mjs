@@ -34,7 +34,11 @@ const server = createServer(async (request, response) => {
     const filename = path.resolve(root, relative)
     if (filename !== root && !filename.startsWith(root + path.sep))
       throw new Error('outside fixture root')
-    const bytes = await readFile(filename)
+    const bytes = await readFile(
+      relative === 'src/browser.js' && process.env.DSH_TEST_BROWSER_SOURCE
+        ? path.resolve(process.env.DSH_TEST_BROWSER_SOURCE)
+        : filename,
+    )
     response.writeHead(200, {
       'content-type': filename.endsWith('.html')
         ? 'text/html; charset=utf-8'
@@ -228,13 +232,39 @@ async function installHelpers() {
           buttonBottomGap: c.bottom - button.getBoundingClientRect().bottom,
         }
       },
+      hostDock: () => {
+        const rect = (id) => {
+          const node = document.getElementById(id)
+          const box = node.getBoundingClientRect()
+          return { top: box.top, bottom: box.bottom, height: box.height }
+        }
+        const scroll = document.getElementById('scroll')
+        const seat = rect('composerSeat')
+        return {
+          viewport: innerHeight,
+          scroll: rect('scroll'),
+          seat,
+          view: rect('hostViewArea'),
+          content: rect('conversation'),
+          editor: rect('editorScroll'),
+          actions: rect('composerActions'),
+          scrollTop: scroll.scrollTop,
+          scrollHeight: scroll.scrollHeight,
+          scrollClientHeight: scroll.clientHeight,
+          bodyHeight: document.body.scrollHeight,
+          belowComposer: seat.bottom < innerHeight - 1,
+        }
+      },
       state: () => window.controller.settings(),
     }
   })
 }
-async function navigate(persist = false) {
+async function navigate(persist = false, hostLayout = false) {
+  const query = new URLSearchParams()
+  if (persist) query.set('persist', '1')
+  if (hostLayout) query.set('host-layout', '1')
   await send('Page.navigate', {
-    url: `${origin}/test/rewrite-fixture.html${persist ? '?persist=1' : ''}`,
+    url: `${origin}/test/rewrite-fixture.html?${query}`,
   })
   let ready = false
   for (let index = 0; index < 100 && !ready; index++) {
@@ -274,6 +304,178 @@ function assertComposerLayout(info, hasHandle = true) {
       JSON.stringify(info),
     )
   }
+}
+function assertHostDock(info, reserve = 0) {
+  assert.ok(
+    Math.abs(info.seat.bottom - info.scroll.bottom) < 1,
+    JSON.stringify(info),
+  )
+  assert.ok(info.scroll.bottom <= info.viewport + 1, JSON.stringify(info))
+  assert.ok(info.bodyHeight <= info.viewport + 1, JSON.stringify(info))
+  assert.ok(
+    info.seat.top >= info.scroll.top + reserve - 1,
+    JSON.stringify(info),
+  )
+  assert.equal(info.belowComposer, false, JSON.stringify(info))
+}
+
+async function startComposerPositionFault() {
+  await page(() => {
+    const seat = document.getElementById('composerSeat')
+    window.fixture.recoveryNodes = {
+      seat,
+      parent: seat.parentNode,
+      scroll: document.getElementById('scroll'),
+    }
+    // Native AssistantMarkdown marks its outer root while the body grows.
+    document
+      .getElementById('answer3')
+      .parentElement.setAttribute('data-streaming', 'true')
+    document.getElementById('answer3').textContent = window.fixture.lines(
+      '正在输出',
+      150,
+    )
+    document.getElementById('conversation').setAttribute('data-chat-motion', '')
+    const fault = document.createElement('style')
+    fault.id = 'hostComposerPositionFault'
+    fault.textContent =
+      '#main.hostComposerUnpinned #composerSeat { position:relative; } #main.hostComposerShifted #composerSeat { top:-90px; }'
+    document.head.append(fault)
+    document.getElementById('main').classList.add('hostComposerUnpinned')
+    document.getElementById('scroll').scrollTop = 0
+  })
+  await settle()
+}
+async function stopComposerPositionFault(restart = false) {
+  await page((restart) => {
+    document.getElementById('main').classList.remove('hostComposerUnpinned')
+    document.getElementById('main').classList.remove('hostComposerShifted')
+    document.getElementById('hostComposerPositionFault')?.remove()
+    document
+      .getElementById('answer3')
+      .parentElement.removeAttribute('data-streaming')
+    document.getElementById('conversation').removeAttribute('data-chat-motion')
+    document.querySelector('[data-conversation-composer-overlay]')?.remove()
+    if (restart) window.fixture.restart()
+    else window.controller.rescan()
+  }, restart)
+  await settle()
+}
+async function composerRecovery() {
+  return page(() => {
+    const seat = document.getElementById('composerSeat')
+    const reserve = document.querySelector('[data-lf-composer-reserve]')
+    const nodes = window.fixture.recoveryNodes
+    return {
+      recovered: seat.hasAttribute('data-lf-composer-recovered'),
+      position: getComputedStyle(seat).position,
+      reserves: document.querySelectorAll('[data-lf-composer-reserve]').length,
+      reservedHeight: reserve?.getBoundingClientRect().height ?? 0,
+      seatHeight: seat.getBoundingClientRect().height,
+      reserveInert: reserve?.inert ?? false,
+      reserveHidden: reserve?.getAttribute('aria-hidden') ?? null,
+      sameSeat: seat === nodes.seat,
+      sameParent: seat.parentNode === nodes.parent,
+      sameScroll: document.getElementById('scroll') === nodes.scroll,
+      scrollTop: nodes.scroll.scrollTop,
+    }
+  })
+}
+function assertComposerRecovery(info, active) {
+  assert.equal(info.recovered, active, JSON.stringify(info))
+  assert.equal(info.reserves, active ? 1 : 0, JSON.stringify(info))
+  assert.equal(info.sameSeat, true, JSON.stringify(info))
+  assert.equal(info.sameParent, true, JSON.stringify(info))
+  assert.equal(info.sameScroll, true, JSON.stringify(info))
+  if (active) {
+    assert.equal(info.position, 'fixed', JSON.stringify(info))
+    assert.ok(
+      Math.abs(info.reservedHeight - info.seatHeight) < 1,
+      JSON.stringify(info),
+    )
+    assert.equal(info.reserveInert, true, JSON.stringify(info))
+    assert.equal(info.reserveHidden, 'true', JSON.stringify(info))
+  }
+}
+
+async function installComposerScrollProbe() {
+  await page(() => {
+    const root = document.getElementById('scroll')
+    const seat = document.getElementById('composerSeat')
+    let prototype = root
+    while (!Object.hasOwn(prototype, 'scrollTop'))
+      prototype = Object.getPrototypeOf(prototype)
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, 'scrollTop')
+    const measure = seat.getBoundingClientRect
+    const state = { writes: [], samples: [] }
+    const sample = (reason) => {
+      state.samples.push({
+        reason,
+        top: descriptor.get.call(root),
+        max: root.scrollHeight - root.clientHeight,
+      })
+    }
+    // Read the browser's real layout during composer measurements. Checking only
+    // the final scrollTop misses a temporary shrink followed by a restoring write.
+    Object.defineProperty(root, 'scrollTop', {
+      configurable: true,
+      get() {
+        sample('read')
+        return descriptor.get.call(root)
+      },
+      set(value) {
+        state.writes.push({ value, stack: new Error().stack })
+        descriptor.set.call(root, value)
+        sample('write')
+      },
+    })
+    seat.getBoundingClientRect = function () {
+      const rect = measure.call(this)
+      sample('measure')
+      return rect
+    }
+    sample('start')
+    window.fixture.scrollProbe = {
+      snapshot() {
+        sample('end')
+        return structuredClone(state)
+      },
+      reset() {
+        state.writes.length = 0
+        state.samples.length = 0
+        sample('start')
+      },
+      dispose() {
+        delete root.scrollTop
+        delete seat.getBoundingClientRect
+      },
+    }
+  })
+}
+function assertPassiveComposerScroll(probe) {
+  const start = probe.samples[0]
+  assert.equal(
+    probe.writes.length,
+    0,
+    JSON.stringify({
+      writes: probe.writes.length,
+      firstWrite: probe.writes[0],
+      start,
+      minimumRange: Math.min(...probe.samples.map((sample) => sample.max)),
+      minimumTop: Math.min(...probe.samples.map((sample) => sample.top)),
+    }),
+  )
+  for (const sample of probe.samples) {
+    assert.ok(
+      sample.max >= start.max - 1,
+      `Scroll range shrank during a composer measurement: ${JSON.stringify({ start, sample })}`,
+    )
+    assert.ok(
+      Math.abs(sample.top - start.top) <= 1,
+      `Reader position changed during a composer measurement: ${JSON.stringify({ start, sample })}`,
+    )
+  }
+  return { top: start.top, samples: probe.samples.length, writes: 0 }
 }
 
 try {
@@ -1677,6 +1879,721 @@ try {
       } finally {
         await page(() => window.fixture.bundleDispose?.())
       }
+    },
+  )
+  await check('宿主嵌套滚动布局中展开长步骤后输入框仍位于底部', async () => {
+    await navigate(false, true)
+    await page(() => {
+      const step = document.getElementById('groupStep1')
+      const lines = document.createElement('div')
+      lines.id = 'hostLongSteps'
+      lines.textContent = window.fixture.lines('工具步骤', 120)
+      step.append(lines)
+      window.controller.rescan()
+    })
+    await settle()
+    await page(() => window.qa.stepButtons('1')[0].click())
+    await settle()
+    const info = await page(() => window.qa.hostDock())
+    assert.ok(
+      info.content.height > info.scroll.height * 3,
+      JSON.stringify(info),
+    )
+    assertHostDock(info)
+    await screenshot('composer-host-longsteps.png')
+    return info
+  })
+  await check(
+    '宿主滚动容器在流式追加及上中下三个位置均保持输入框贴底',
+    async () => {
+      await page(() => {
+        const steps = document.getElementById('hostLongSteps')
+        steps.textContent +=
+          '\n' + window.fixture.lines('流式追加工具步骤', 100)
+        window.controller.rescan()
+      })
+      await settle()
+      const states = []
+      for (const position of [0, 0.5, 1]) {
+        await page((position) => {
+          const scroll = document.getElementById('scroll')
+          scroll.scrollTop =
+            (scroll.scrollHeight - scroll.clientHeight) * position
+        }, position)
+        await settle()
+        const info = await page(() => window.qa.hostDock())
+        assertHostDock(info)
+        states.push({
+          position,
+          top: info.seat.top,
+          bottom: info.seat.bottom,
+          scrollTop: info.scrollTop,
+        })
+      }
+      return states
+    },
+  )
+  await check(
+    '宿主布局中展开与收起超长回复后输入框不会被正文顶到中间',
+    async () => {
+      await page(() => {
+        document.getElementById('answer1').textContent = window.fixture.lines(
+          '超长回复',
+          160,
+        )
+        document.getElementById('scroll').scrollTop = 0
+        window.controller.rescan()
+      })
+      await settle()
+      const states = []
+      for (const open of [true, false, true, false]) {
+        await clickMessage('answer1')
+        const info = await page(() => window.qa.hostDock())
+        assertHostDock(info)
+        assert.equal(
+          await page(() => window.qa.message('answer1').expanded),
+          String(open),
+        )
+        states.push({
+          open,
+          top: info.seat.top,
+          bottom: info.seat.bottom,
+          scrollHeight: info.scrollHeight,
+        })
+      }
+      return states
+    },
+  )
+  await check(
+    '展开期间外层消息区暂时保留旧高度时，输入框仍贴底且不改动宿主节点',
+    async () => {
+      await page(() => {
+        const view = document.getElementById('hostViewArea')
+        window.fixture.dockNodes = {
+          scroll: document.getElementById('scroll'),
+          seat: document.getElementById('composerSeat'),
+          conversation: document.getElementById('conversation'),
+          seatParent: document.getElementById('composerSeat').parentNode,
+        }
+        view.style.cssText =
+          'flex:none; height:160px; min-height:0; overflow:visible'
+        document.getElementById('scroll').scrollTop = 0
+      })
+      try {
+        await settle()
+        await clickMessage('answer1')
+        const info = await page(() => window.qa.hostDock())
+        assert.ok(
+          info.content.height > info.view.height * 5,
+          JSON.stringify(info),
+        )
+        assertHostDock(info)
+        assert.equal(info.scrollTop, 0)
+        assert.equal(
+          await page(() => {
+            const nodes = window.fixture.dockNodes
+            return (
+              nodes.scroll === document.getElementById('scroll') &&
+              nodes.seat === document.getElementById('composerSeat') &&
+              nodes.conversation === document.getElementById('conversation') &&
+              nodes.seat.parentNode === nodes.seatParent
+            )
+          }),
+          true,
+        )
+        await screenshot('composer-host-expansion-stale-height.png')
+        return info
+      } finally {
+        await page(() =>
+          document.getElementById('hostViewArea').removeAttribute('style'),
+        )
+        await settle()
+      }
+    },
+  )
+  await check(
+    '关闭拖拽仍保持底部定位，遮罩和非对话阶段交还原生布局',
+    async () => {
+      await update({ composerResize: false })
+      assertHostDock(await page(() => window.qa.hostDock()))
+      assert.equal(
+        await page(
+          () => document.querySelectorAll('[data-lf-composer-handle]').length,
+        ),
+        0,
+      )
+      await page(() => {
+        const overlay = document.createElement('div')
+        overlay.setAttribute('data-conversation-composer-overlay', '')
+        document.getElementById('scroll').append(overlay)
+      })
+      await settle()
+      const overlay = await page(() => {
+        const seat = document.getElementById('composerSeat')
+        return {
+          position: getComputedStyle(seat).position,
+          docked: seat.hasAttribute('data-lf-composer-docked'),
+          inset: seat.style.getPropertyValue('--lf-composer-top'),
+        }
+      })
+      assert.deepEqual(overlay, {
+        position: 'absolute',
+        docked: false,
+        inset: '',
+      })
+      await page(() => {
+        document.querySelector('[data-conversation-composer-overlay]').remove()
+        document
+          .getElementById('hostBody')
+          .setAttribute('data-content-phase', 'hero')
+        document.getElementById('main').setAttribute('data-phase', 'hero')
+      })
+      await settle()
+      assert.equal(
+        await page(() =>
+          document
+            .getElementById('composerSeat')
+            .hasAttribute('data-lf-composer-docked'),
+        ),
+        false,
+      )
+      await page(() => {
+        document
+          .getElementById('hostBody')
+          .setAttribute('data-content-phase', 'active')
+        document.getElementById('main').setAttribute('data-phase', 'active')
+        document.getElementById('scroll').scrollTop = 0
+      })
+      await settle()
+      assertHostDock(await page(() => window.qa.hostDock()))
+      await update({ composerResize: true })
+      return overlay
+    },
+  )
+  await check(
+    '窗口缩小后已保存的较高输入区会适配可用高度并保留聊天区域',
+    async () => {
+      await page(() => window.controller.setHeight(700))
+      await settle()
+      try {
+        await send('Emulation.setDeviceMetricsOverride', {
+          width: 1280,
+          height: 420,
+          deviceScaleFactor: 1,
+          mobile: false,
+        })
+        await settle()
+        const info = await page(() => window.qa.hostDock())
+        assertHostDock(info, 64)
+        assert.ok(info.actions.top >= info.scroll.top, JSON.stringify(info))
+        return info
+      } finally {
+        await send('Emulation.clearDeviceMetricsOverride')
+        await settle()
+      }
+    },
+  )
+  await check(
+    '重载时过大的旧输入区高度会适配窗口，扩大窗口后恢复高度偏好',
+    async () => {
+      await page(() =>
+        localStorage.setItem('dsh.bubble-fold.composer-height', '1400'),
+      )
+      await navigate(true, true)
+      const info = await page(() => window.qa.hostDock())
+      assertHostDock(info, 64)
+      const value = await page(() =>
+        localStorage.getItem('dsh.bubble-fold.composer-height'),
+      )
+      assert.equal(value, '1400')
+      try {
+        await send('Emulation.setDeviceMetricsOverride', {
+          width: 1280,
+          height: 1800,
+          deviceScaleFactor: 1,
+          mobile: false,
+        })
+        await settle()
+        const enlarged = await page(() => window.qa.hostDock())
+        assertHostDock(enlarged, 64)
+        assert.equal(enlarged.editor.height, 1400)
+        return { initial: info, enlarged }
+      } finally {
+        await send('Emulation.clearDeviceMetricsOverride')
+        await settle()
+      }
+    },
+  )
+  await check(
+    '宿主输入区临时只读时展开回复和步骤仍保留底部定位及原有手柄',
+    async () => {
+      await navigate(false, true)
+      await page(() => {
+        window.fixture.readonlyComposerNodes = {
+          card: document.getElementById('composerCard'),
+          input: document.getElementById('editor'),
+          handle: document.querySelector('[data-lf-composer-handle]'),
+        }
+        for (const input of document.querySelectorAll('[data-composer-input]'))
+          input.setAttribute('contenteditable', 'false')
+      })
+      try {
+        await settle()
+        await clickMessage('answer1')
+        await page(() => window.qa.stepButtons('1')[0].click())
+        await settle()
+        const readonly = await page(() => {
+          const nodes = window.fixture.readonlyComposerNodes
+          return {
+            editable: nodes.input.getAttribute('contenteditable'),
+            marked: document
+              .getElementById('composerSeat')
+              .hasAttribute('data-lf-composer-docked'),
+            sameCard: nodes.card === document.getElementById('composerCard'),
+            sameInput: nodes.input === document.getElementById('editor'),
+            sameHandle:
+              nodes.handle ===
+              document.querySelector('[data-lf-composer-handle]'),
+            handles: document.querySelectorAll('[data-lf-composer-handle]')
+              .length,
+          }
+        })
+        assert.deepEqual(readonly, {
+          editable: 'false',
+          marked: true,
+          sameCard: true,
+          sameInput: true,
+          sameHandle: true,
+          handles: 1,
+        })
+        assertHostDock(await page(() => window.qa.hostDock()))
+        await page(() => {
+          for (const input of document.querySelectorAll(
+            '[data-composer-input]',
+          ))
+            input.setAttribute('contenteditable', 'true')
+        })
+        await settle()
+        const restored = await page(() => ({
+          editable: document
+            .getElementById('editor')
+            .getAttribute('contenteditable'),
+          sameHandle:
+            window.fixture.readonlyComposerNodes.handle ===
+            document.querySelector('[data-lf-composer-handle]'),
+          marked: document
+            .getElementById('composerSeat')
+            .hasAttribute('data-lf-composer-docked'),
+        }))
+        assert.deepEqual(restored, {
+          editable: 'true',
+          sameHandle: true,
+          marked: true,
+        })
+        assertComposerLayout(await page(() => window.qa.composer()))
+        assertHostDock(await page(() => window.qa.hostDock()))
+        return { readonly, restored }
+      } finally {
+        await page(() => {
+          for (const input of document.querySelectorAll(
+            '[data-composer-input]',
+          ))
+            input.setAttribute('contenteditable', 'true')
+          window.controller.rescan()
+        })
+        await settle()
+      }
+    },
+  )
+  await check(
+    '插件在原生输入区只读时启动也能定位，恢复编辑无需额外消息变更',
+    async () => {
+      await navigate(false, true)
+      await page(() => {
+        for (const input of document.querySelectorAll('[data-composer-input]'))
+          input.setAttribute('contenteditable', 'false')
+        window.fixture.restart()
+      })
+      try {
+        await settle()
+        const readonly = await page(() => ({
+          editable: document
+            .getElementById('editor')
+            .getAttribute('contenteditable'),
+          handles: document.querySelectorAll('[data-lf-composer-handle]')
+            .length,
+          marked: document
+            .getElementById('composerSeat')
+            .hasAttribute('data-lf-composer-docked'),
+        }))
+        assert.deepEqual(readonly, {
+          editable: 'false',
+          handles: 1,
+          marked: true,
+        })
+        assertComposerLayout(await page(() => window.qa.composer()))
+        assertHostDock(await page(() => window.qa.hostDock()))
+        await page(() => {
+          for (const input of document.querySelectorAll(
+            '[data-composer-input]',
+          ))
+            input.setAttribute('contenteditable', 'true')
+        })
+        await settle()
+        const restored = await page(() => ({
+          editable: document
+            .getElementById('editor')
+            .getAttribute('contenteditable'),
+          handles: document.querySelectorAll('[data-lf-composer-handle]')
+            .length,
+          marked: document
+            .getElementById('composerSeat')
+            .hasAttribute('data-lf-composer-docked'),
+        }))
+        assert.deepEqual(restored, {
+          editable: 'true',
+          handles: 1,
+          marked: true,
+        })
+        assertHostDock(await page(() => window.qa.hostDock()))
+        return { readonly, restored }
+      } finally {
+        await page(() => {
+          for (const input of document.querySelectorAll(
+            '[data-composer-input]',
+          ))
+            input.setAttribute('contenteditable', 'true')
+          window.controller.rescan()
+        })
+        await settle()
+      }
+    },
+  )
+  await check(
+    '流式追加、只读切换和重复扫描不会写入历史滚动位置或瞬间缩小滚动范围',
+    async () => {
+      await navigate(false, true)
+      await page(() => {
+        document
+          .getElementById('answer3')
+          .parentElement.setAttribute('data-streaming', 'true')
+        document.getElementById('answer3').textContent = window.fixture.lines(
+          '正在输出',
+          160,
+        )
+        window.controller.setHeight(540)
+      })
+      await settle()
+      await page(() => {
+        const root = document.getElementById('scroll')
+        root.scrollTop = root.scrollHeight - root.clientHeight - 80
+      })
+      await settle()
+      await installComposerScrollProbe()
+      try {
+        await page(async () => {
+          for (let index = 0; index < 4; index++) {
+            document.getElementById('answer3').textContent +=
+              '\n' + window.fixture.lines(`继续输出 ${index}`, 2)
+            document
+              .getElementById('editor')
+              .setAttribute('contenteditable', index % 2 ? 'true' : 'false')
+            window.controller.rescan()
+            await new Promise((resolve) => requestAnimationFrame(resolve))
+          }
+        })
+        await settle()
+        const probe = await page(() => window.fixture.scrollProbe.snapshot())
+        const detail = assertPassiveComposerScroll(probe)
+        assertHostDock(await page(() => window.qa.hostDock()))
+        return detail
+      } finally {
+        await page(() => window.fixture.scrollProbe.dispose())
+      }
+    },
+  )
+  await check(
+    '定位恢复期间扫描和追加正文不会移除预留高度或写入历史滚动位置',
+    async () => {
+      await navigate(false, true)
+      await page(() => window.controller.setHeight(196))
+      await settle()
+      await startComposerPositionFault()
+      await page(() => {
+        document.getElementById('main').classList.add('hostComposerShifted')
+        const root = document.getElementById('scroll')
+        root.scrollTop = root.scrollHeight - root.clientHeight - 60
+      })
+      await settle()
+      assertComposerRecovery(await composerRecovery(), true)
+      await installComposerScrollProbe()
+      try {
+        await page(async () => {
+          for (let index = 0; index < 4; index++) {
+            document.getElementById('answer3').textContent += '\n继续输出'
+            window.controller.rescan()
+            await new Promise((resolve) => requestAnimationFrame(resolve))
+          }
+        })
+        await settle()
+        const probe = await page(() => window.fixture.scrollProbe.snapshot())
+        const detail = assertPassiveComposerScroll(probe)
+        assertComposerRecovery(await composerRecovery(), true)
+        assertHostDock(await page(() => window.qa.hostDock()))
+        return detail
+      } finally {
+        await page(() => window.fixture.scrollProbe.dispose())
+        await stopComposerPositionFault()
+      }
+    },
+  )
+  await check(
+    '回答结束后实际滚轮上翻与重复扫描均不会抢回阅读位置',
+    async () => {
+      await navigate(false, true)
+      await page(() => {
+        document.getElementById('answer3').textContent = window.fixture.lines(
+          '已完成回复',
+          160,
+        )
+        window.controller.setHeight(440)
+      })
+      await settle()
+      const before = await page(() => {
+        const root = document.getElementById('scroll')
+        root.scrollTop = root.scrollHeight - root.clientHeight
+        const rect = root.getBoundingClientRect()
+        return { top: root.scrollTop, x: rect.left + 80, y: rect.top + 80 }
+      })
+      await settle()
+      await installComposerScrollProbe()
+      await send('Input.dispatchMouseEvent', {
+        type: 'mouseWheel',
+        x: before.x,
+        y: before.y,
+        deltaX: 0,
+        deltaY: -240,
+      })
+      await settle()
+      const readerTop = await page(
+        () => document.getElementById('scroll').scrollTop,
+      )
+      assert.ok(
+        readerTop < before.top - 100,
+        JSON.stringify({ before, readerTop }),
+      )
+      try {
+        const wheelProbe = await page(() =>
+          window.fixture.scrollProbe.snapshot(),
+        )
+        assert.equal(
+          wheelProbe.writes.length,
+          0,
+          JSON.stringify(wheelProbe.writes[0]),
+        )
+        await page(async () => {
+          window.fixture.scrollProbe.reset()
+          for (let index = 0; index < 4; index++) {
+            window.controller.rescan()
+            await new Promise((resolve) => requestAnimationFrame(resolve))
+          }
+        })
+        await settle()
+        const probe = await page(() => window.fixture.scrollProbe.snapshot())
+        const detail = assertPassiveComposerScroll(probe)
+        assert.ok(Math.abs(detail.top - readerTop) <= 1)
+        return { fromBottom: before.top - readerTop, ...detail }
+      } finally {
+        await page(() => window.fixture.scrollProbe.dispose())
+      }
+    },
+  )
+  await check(
+    '运行中宿主定位异常时恢复输入框位置，流式追加和步骤展开保留原滚动容器',
+    async () => {
+      await navigate(false, true)
+      await page(() => window.controller.setHeight(196))
+      await settle()
+      assert.equal(
+        await page(
+          () =>
+            document.querySelectorAll(
+              '[data-lf-composer-recovered],[data-lf-composer-reserve]',
+            ).length,
+        ),
+        0,
+      )
+      await startComposerPositionFault()
+      try {
+        const states = []
+        for (let index = 0; index < 3; index++) {
+          await page((index) => {
+            document.getElementById('answer3').textContent +=
+              '\n' + window.fixture.lines(`继续输出 ${index}`, 12)
+            window.qa.stepButtons('1')[0].click()
+          }, index)
+          await settle()
+          const state = await composerRecovery()
+          assertComposerRecovery(state, true)
+          assert.equal(state.scrollTop, 0, JSON.stringify(state))
+          assertHostDock(await page(() => window.qa.hostDock()))
+          states.push(state)
+        }
+        const scrolled = []
+        for (const position of [0.5, 1]) {
+          const intended = await page((position) => {
+            // Relative positioning naturally lands at the floor. Keep a real
+            // host displacement there to exercise active recovery while idle.
+            if (position === 1)
+              document
+                .getElementById('main')
+                .classList.add('hostComposerShifted')
+            const scroll = document.getElementById('scroll')
+            scroll.scrollTop =
+              (scroll.scrollHeight - scroll.clientHeight) * position
+            return scroll.scrollTop
+          }, position)
+          await settle()
+          const state = await composerRecovery()
+          assertComposerRecovery(state, true)
+          assert.ok(
+            Math.abs(state.scrollTop - intended) <= 1,
+            JSON.stringify({ intended, state }),
+          )
+          assertHostDock(await page(() => window.qa.hostDock()))
+          scrolled.push({ position, intended, state })
+        }
+        const idleWrites = await page(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 350))
+          let writes = 0
+          const observer = new MutationObserver((records) => {
+            writes += records.length
+          })
+          observer.observe(document.body, {
+            subtree: true,
+            attributes: true,
+            childList: true,
+          })
+          await new Promise((resolve) => setTimeout(resolve, 350))
+          observer.disconnect()
+          return writes
+        })
+        assert.equal(idleWrites, 0)
+        assertComposerRecovery(await composerRecovery(), true)
+        await stopComposerPositionFault()
+        const restored = await composerRecovery()
+        assertComposerRecovery(restored, false)
+        assert.equal(restored.position, 'sticky', JSON.stringify(restored))
+        assert.ok(
+          Math.abs(restored.scrollTop - scrolled.at(-1).intended) <= 1,
+          JSON.stringify(restored),
+        )
+        assertHostDock(await page(() => window.qa.hostDock()))
+        return { states, scrolled, idleWrites, restored }
+      } finally {
+        await stopComposerPositionFault()
+      }
+    },
+  )
+  await check(
+    '定位恢复期间打开交互遮罩、停用或卸载插件会移除固定定位与预留区',
+    async () => {
+      await navigate(false, true)
+      await startComposerPositionFault()
+      try {
+        assertComposerRecovery(await composerRecovery(), true)
+        await page(() => {
+          const overlay = document.createElement('div')
+          overlay.setAttribute('data-conversation-composer-overlay', '')
+          document.getElementById('composerCard').append(overlay)
+        })
+        await settle()
+        const overlay = await composerRecovery()
+        assertComposerRecovery(overlay, false)
+        assert.notEqual(overlay.position, 'fixed', JSON.stringify(overlay))
+        await page(() =>
+          document
+            .querySelector('[data-conversation-composer-overlay]')
+            .remove(),
+        )
+        await settle()
+        assertComposerRecovery(await composerRecovery(), true)
+        await update({ enabled: false })
+        const disabled = await composerRecovery()
+        assertComposerRecovery(disabled, false)
+        assert.equal(disabled.position, 'relative', JSON.stringify(disabled))
+        await update({ enabled: true })
+        assertComposerRecovery(await composerRecovery(), true)
+        await page(() => window.controller.dispose())
+        await settle()
+        const disposed = await composerRecovery()
+        assertComposerRecovery(disposed, false)
+        assert.equal(disposed.position, 'relative', JSON.stringify(disposed))
+        assert.equal(
+          await page(
+            () => document.getElementById('composerSeat').style.position,
+          ),
+          '',
+        )
+        return { overlay, disabled, disposed }
+      } finally {
+        await stopComposerPositionFault(true)
+      }
+    },
+  )
+  await check(
+    '宿主布局空闲时无持续重绘，停用和卸载会清除定位约束',
+    async () => {
+      const writes = await page(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 350))
+        let writes = 0
+        const observer = new MutationObserver((records) => {
+          writes += records.length
+        })
+        observer.observe(document.body, {
+          subtree: true,
+          attributes: true,
+          childList: true,
+        })
+        await new Promise((resolve) => setTimeout(resolve, 500))
+        observer.disconnect()
+        return writes
+      })
+      assert.equal(writes, 0)
+      await update({ enabled: false })
+      assert.deepEqual(
+        await page(() => {
+          const seat = document.getElementById('composerSeat')
+          return {
+            marked: seat.hasAttribute('data-lf-composer-docked'),
+            inset: seat.style.getPropertyValue('--lf-composer-top'),
+            height: document.getElementById('editorScroll').style.height,
+          }
+        }),
+        { marked: false, inset: '', height: '' },
+      )
+      await update({ enabled: true })
+      assertHostDock(await page(() => window.qa.hostDock()), 64)
+      await page(() => window.controller.dispose())
+      await settle()
+      assert.equal(
+        await page(
+          () =>
+            document.querySelectorAll(
+              '[data-lf-composer-docked],[data-lf-composer-handle]',
+            ).length,
+        ),
+        0,
+      )
+      assert.equal(
+        await page(() =>
+          document
+            .getElementById('composerSeat')
+            .style.getPropertyValue('--lf-composer-top'),
+        ),
+        '',
+      )
+      return { idleWrites: writes, restored: true }
     },
   )
   await check('浏览器无未捕获异常', async () => {

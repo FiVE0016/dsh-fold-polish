@@ -389,7 +389,13 @@
         <div id="composerSeat" data-composer-seat>
           <div id="composerCard" data-composer-card>
             <div id="editorScroll" data-input-scroll>
-              <div id="editor" contenteditable="true">
+              <div
+                id="editor"
+                data-composer-input
+                contenteditable="true"
+                role="textbox"
+                aria-multiline="true"
+              >
                 输入区，用于验证顶部拖拽手柄。
               </div>
             </div>
@@ -484,6 +490,62 @@
             host.append(row)
           }
         },
+      }
+      // DSH 0.2.1-rc.2 keeps the active composer inside the same scrollport
+      // as the session view. This mode retains that host flex/sticky nesting
+      // instead of the simpler sibling layout used by the folding checks.
+      if (new URLSearchParams(location.search).has('host-layout')) {
+        const style = document.createElement('style')
+        style.textContent = `
+          #main { height:100%; overflow:hidden; position:relative; }
+          #hostBody { display:flex; flex-direction:column; flex:1; min-height:0; position:relative; }
+          #scroll { display:flex; flex-direction:column; flex:1; min-height:0; overflow-y:auto; scrollbar-gutter:stable; margin-right:2px; padding:0; }
+          [data-slot="conversation.session"], [data-slot="conversation.view"] { display:contents; }
+          #hostViewArea { display:flex; flex-direction:column; flex:1; min-height:0; }
+          #main[data-phase="active"] #hostViewArea { flex:1 0 auto; min-height:auto; }
+          #hostChatFrame, #hostChatRoot { display:flex; flex-direction:column; flex:none; height:auto; min-height:auto; position:relative; }
+          #hostChatFrame, #hostChatScroll { container-type:inline-size; }
+          #hostChatRoot { overflow:visible clip; }
+          #hostChatScroll { flex:none; min-height:auto; overflow:visible; padding:16px 28px; }
+          #conversation { display:flex; flex-direction:column; width:100%; }
+          #composerSeat { display:flex; flex-direction:column; flex:none; }
+          #main[data-phase="active"] #composerSeat { position:sticky; bottom:0; z-index:7; }
+          #scroll:has([data-conversation-composer-overlay]) { position:relative; overflow:hidden auto; scrollbar-gutter:auto; }
+          #scroll:has([data-conversation-composer-overlay]) > [data-slot="conversation.session"] > #hostViewArea { flex:1 1 0; min-height:0; overflow:hidden; }
+          #scroll:has([data-conversation-composer-overlay]) > #composerSeat { position:absolute; bottom:0; left:0; right:0; }
+        `
+        document.head.append(style)
+        const wrap = (id, attribute, value = '') => {
+          const node = document.createElement('div')
+          node.id = id
+          if (attribute) node.setAttribute(attribute, value)
+          return node
+        }
+        const scroll = document.getElementById('scroll')
+        const body = wrap('hostBody', 'data-conversation-content')
+        body.setAttribute('data-content-phase', 'active')
+        body.setAttribute('data-conversation-region', 'chat')
+        body.setAttribute('data-conversation-session', 'fixture-session')
+        scroll.before(body)
+        body.append(scroll)
+        const slot = wrap(
+          'hostSessionSlot',
+          'data-slot',
+          'conversation.session',
+        )
+        const view = wrap('hostViewArea')
+        const viewSlot = wrap('hostViewSlot', 'data-slot', 'conversation.view')
+        const frame = wrap('hostChatFrame')
+        const root = wrap('hostChatRoot')
+        const chat = wrap('hostChatScroll')
+        chat.append(document.getElementById('conversation'))
+        root.append(chat)
+        frame.append(root)
+        viewSlot.append(frame)
+        view.append(viewSlot)
+        slot.append(view)
+        scroll.append(slot, document.getElementById('composerSeat'))
+        document.getElementById('main').setAttribute('data-phase', 'active')
       }
       for (const header of document.querySelectorAll('.groupHeader'))
         header.addEventListener('click', () => {
