@@ -9,6 +9,9 @@ export const SCAN_BUDGET_MS = 6
 export const PENDING_BUDGET_MS = 40
 export const PENDING_MIN_MS = 250
 export const PENDING_MAX_MS = 2500
+// How many loaded turns before the reader is reminded that switching away and
+// back lets the host unload older history (the same trick they already use).
+export const LOADED_TURN_HINT = 40
 export const COMPOSER_STORAGE_KEY = 'dsh.bubble-fold.composer-height'
 export const COMPOSER_DEFAULT = 336
 
@@ -45,6 +48,16 @@ const CSS = `
   transition:opacity .16s ease;
 }
 [data-lf-pending][data-lf-visible] { opacity:1; pointer-events:auto; }
+[data-lf-hint] {
+  position:fixed; left:50%; transform:translateX(-50%); z-index:44; max-width:min(90vw,560px);
+  display:flex; align-items:center; gap:8px; padding:6px 10px; border-radius:999px;
+  background:var(--dsw-alias-bg-layer-1,Canvas); color:var(--dsw-alias-label-secondary,#68707d);
+  border:1px solid var(--dsw-alias-border-l2,color-mix(in srgb,currentColor 18%,transparent));
+  font-size:12px; line-height:18px; box-shadow:0 2px 10px rgba(15,23,42,.12);
+  opacity:0; pointer-events:none; transition:opacity .16s ease;
+}
+[data-lf-hint][data-lf-visible] { opacity:1; pointer-events:auto; }
+[data-lf-hint-close] { border:0; background:transparent; color:inherit; cursor:pointer; font-size:14px; line-height:1; padding:0 2px; }
 [data-lf-pending-badge] {
   display:inline-flex; align-items:center; gap:8px; padding:6px 14px; border-radius:999px;
   border:1px solid var(--dsw-alias-border-l2,color-mix(in srgb,currentColor 18%,transparent));
@@ -414,6 +427,10 @@ export function start(env, React, timerStore) {
     queueLatest = '',
     queueIndex = 0,
     rebuilding = false
+  // Rows whose own subtree changed. Only these are re-rendered between full
+  // rebuilds; a structural change (new message, pagination, step block) still
+  // rebuilds everything, because group/timer composition may have moved.
+  const dirtyRows = new Set()
   let observedScrollRoot = null
   // One style read per scan (instead of one per message) and a width guard:
   // a container width change invalidates every cached measurement.
@@ -922,6 +939,49 @@ export function start(env, React, timerStore) {
     }
     pendingNode.setAttribute('data-lf-visible', '')
   }
+  // ---- loaded-content hint ------------------------------------------------
+  // The host unloads older turns only when the conversation is re-entered, and
+  // that is also what makes the page fast again. The plugin cannot unload host
+  // content, so once the transcript holds many turns it offers the same action
+  // as a dismissible hint instead of doing it silently behind the reader.
+  let hintNode = null,
+    hintDismissed = false,
+    hintTurns = 0
+  const hintElement = () => {
+    if (hintNode) return hintNode
+    hintNode = ownNode(doc, 'div', 'data-lf-hint')
+    hintNode.setAttribute('role', 'status')
+    const text = ownNode(doc, 'span', 'data-lf-hint-text')
+    text.textContent = ''
+    const close = ownNode(doc, 'button', 'data-lf-hint-close')
+    close.type = 'button'
+    close.setAttribute('aria-label', '不再提示')
+    close.textContent = '×'
+    close.addEventListener('click', (event) => {
+      event.preventDefault()
+      event.stopPropagation()
+      hintDismissed = true
+      hideHint()
+    })
+    hintNode.append(text, close)
+    return hintNode
+  }
+  const hideHint = () => hintNode?.removeAttribute('data-lf-visible')
+  const showHint = () => {
+    const node = hintElement()
+    const label = `已加载 ${hintTurns} 轮，变慢时可切走再切回以释放内存`
+    const span = node.querySelector('[data-lf-hint-text]')
+    if (span && span.textContent !== label) span.textContent = label
+    const seat = doc.querySelector('[data-composer-seat]')
+    const rect = seat?.getBoundingClientRect?.()
+    const top =
+      rect && rect.height > 0
+        ? Math.max(8, Math.round(rect.top) - 44)
+        : Math.round(view.innerHeight - 160)
+    node.style.top = `${top}px`
+    if (!node.isConnected) doc.body.appendChild(node)
+    node.setAttribute('data-lf-visible', '')
+  }
   function scan() {
     frame = 0
     if (disposed) return
@@ -958,8 +1018,11 @@ export function start(env, React, timerStore) {
           // Entering a conversation: cover the transcript until it is folded.
           pendingArmed = true
           pendingGaveUp = false
+          hintDismissed = false
+          hideHint()
         }
-        if (rebuilding || !queue.length) {
+        if (rebuilding) {
+          dirtyRows.clear()
           const list = units(),
             latest = [...list].reverse().find((unit) => turnOf(unit))
           queue = list.filter(messageKind)
@@ -982,6 +1045,12 @@ export function start(env, React, timerStore) {
           }
           pendingFirstKey = firstKey
           pendingCount = list.length
+          const turnIds = new Set()
+          for (const unit of list) {
+            const id = turnOf(unit)
+            if (id) turnIds.add(id)
+          }
+          hintTurns = turnIds.size
           rebuilding = false
           const live = new Set(list)
           for (const [row, record] of messages)
@@ -989,6 +1058,14 @@ export function start(env, React, timerStore) {
           renderSteps(list)
           renderTimers(list)
           composer.sync(settings.enabled, settings.composerResize)
+        }
+        // Row-local edits do not need the rebuild above: only the touched rows
+        // are re-rendered, which keeps streaming and typing from re-walking the
+        // whole transcript.
+        if (dirtyRows.size) {
+          for (const row of dirtyRows)
+            if (row.isConnected) renderMessage(row, queueLatest)
+          dirtyRows.clear()
         }
         // One computed-style probe per scan feeds the "already fits" fast path.
         if (queue.length) {
@@ -1044,6 +1121,14 @@ export function start(env, React, timerStore) {
             else schedule()
           }
         }
+        if (
+          hintTurns >= LOADED_TURN_HINT &&
+          !hintDismissed &&
+          !streamingBusy &&
+          settings.enabled
+        )
+          showHint()
+        else hideHint()
       })
     } finally {
       observe()
@@ -1067,10 +1152,10 @@ export function start(env, React, timerStore) {
     if (!frame) frame = view.requestAnimationFrame(scan)
   }
   const observer = new view.MutationObserver((records) => {
-    const relevant = records.some((record) => {
-      if (record.target.nodeType === 1 && record.target.closest(OWN))
-        return false
-      if (record.target.parentElement?.closest(OWN)) return false
+    let structural = false
+    for (const record of records) {
+      if (record.target.nodeType === 1 && record.target.closest(OWN)) continue
+      if (record.target.parentElement?.closest(OWN)) continue
       // Typing, draft chips and IME updates live inside the composer card and
       // never change the transcript. Treating each keystroke as a conversation
       // change made the plugin re-scan every message on every character.
@@ -1078,17 +1163,44 @@ export function start(env, React, timerStore) {
         record.target.nodeType === 1
           ? record.target
           : record.target.parentElement
-      if (touched?.closest?.('[data-composer-card]')) return false
+      if (touched?.closest?.('[data-composer-card]')) continue
       if (
         record.type === 'childList' &&
         [...record.addedNodes, ...record.removedNodes].every(
           (node) => node.nodeType === 1 && node.matches(OWN),
         )
       )
-        return false
-      return true
-    })
-    if (relevant) schedule(true)
+        continue
+      if (
+        record.type === 'attributes' &&
+        record.attributeName === 'data-conversation-session'
+      ) {
+        structural = true
+        continue
+      }
+      // Row-local edits (streaming text, a disclosure inside one message) only
+      // need that row re-rendered. A step block or a container-level change can
+      // move group membership, so those still rebuild everything.
+      const row = touched?.closest?.(
+        '[data-chat-flow-kind],[data-step-process]',
+      )
+      const rowIsStep =
+        row?.hasAttribute('data-step-process') ||
+        row?.getAttribute('data-chat-flow-kind') === 'turn-process'
+      // Attributes on the row itself (membership markers, flow kind, streaming
+      // flag) change how groups and step runs are computed, so they rebuild.
+      const rowAttribute = record.type === 'attributes' && touched === row
+      if (!row || rowIsStep || rowAttribute) {
+        structural = true
+        continue
+      }
+      dirtyRows.add(row)
+    }
+    if (structural) {
+      rebuilding = true
+      dirtyRows.clear()
+    }
+    if (structural || dirtyRows.size) schedule(structural)
   })
   function observe() {
     observer.observe(doc.body, {
@@ -1166,7 +1278,7 @@ export function start(env, React, timerStore) {
           if (block.single === target) {
             turnSpread.set(block.turn, true)
             toggleBlock(block, !stepState.get(block.key))
-            schedule()
+            schedule(true)
             return
           }
           if (block.all === target) {
@@ -1179,7 +1291,7 @@ export function start(env, React, timerStore) {
               turnSpread.set(block.turn, false)
               for (const item of group) toggleBlock(item, false)
             }
-            schedule()
+            schedule(true)
             return
           }
           if (block.every === target) {
@@ -1187,7 +1299,7 @@ export function start(env, React, timerStore) {
             const open = !group.every((item) => stepState.get(item.key))
             turnSpread.set(block.turn, true)
             for (const item of group) toggleBlock(item, open)
-            schedule()
+            schedule(true)
             return
           }
         }
@@ -1206,7 +1318,7 @@ export function start(env, React, timerStore) {
         turnSpread.set(block.turn, true)
         toggleBlock(block, true)
       }
-    schedule()
+    schedule(true)
   }
   doc.addEventListener('click', click)
   doc.addEventListener('beforematch', beforematch, true)
@@ -1215,7 +1327,7 @@ export function start(env, React, timerStore) {
   doc.addEventListener('load', resized, true)
   view.addEventListener('resize', resized)
   doc.fonts?.addEventListener?.('loadingdone', resized)
-  const timerOff = timers?.subscribe?.(() => schedule())
+  const timerOff = timers?.subscribe?.(() => schedule(true))
   observe()
   scan()
   function search(query) {
@@ -1343,7 +1455,7 @@ export function start(env, React, timerStore) {
         }
       }),
     )
-    schedule()
+    schedule(true)
     return true
   }
   return {
@@ -1434,6 +1546,9 @@ export function start(env, React, timerStore) {
       pendingNode = null
       pendingShownAt = 0
       pendingArmed = false
+      hintNode?.remove()
+      hintNode = null
+      hintTurns = 0
       style.remove()
       doc.documentElement.removeAttribute(F.ROOT_ATTRIBUTE)
       view.CSS?.highlights?.delete('dsh-fold-match')
