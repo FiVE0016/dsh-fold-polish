@@ -1,6 +1,6 @@
 {
   "name": "dsh-fold-polish",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "DeepSeek Harness conversation polish: message and step folding, composer and sidebar sizing, folded-content search, turn timing, and confirmed local conversation history deletion.",
   "keywords": [
     "dsh",
@@ -62,6 +62,7 @@
     "build": "node scripts/build.mjs",
     "test": "node scripts/regression-check.mjs --fast",
     "test:browser": "node test/rewrite-browser.mjs",
-    "check": "node scripts/regression-check.mjs"
+    "check": "node scripts/regression-check.mjs",
+    "compat": "node scripts/check-host-compat.mjs"
   }
 }

@@ -105,6 +105,14 @@
     // Reversible view controller. Host-owned nodes are never moved or rewritten.
     // Folded messages use a disposable presentation clone; search always reads the source.
     const SCAN_BUDGET_MS = 6
+    // While the conversation is being folded for the first time (or after older
+    // history is prepended) a small overlay covers the transcript, so the reader
+    // never sees half-folded content and the heights cannot shift under them. The
+    // work then runs in larger slices, with a floor so the badge cannot flash and a
+    // ceiling so it can never trap the reader.
+    const PENDING_BUDGET_MS = 40
+    const PENDING_MIN_MS = 250
+    const PENDING_MAX_MS = 2500
     const COMPOSER_STORAGE_KEY = 'dsh.bubble-fold.composer-height'
     const COMPOSER_DEFAULT = 336
 
@@ -134,6 +142,25 @@
     [data-lf-toggle]:hover, [data-lf-step-line] button:hover {
       color:var(--dsw-alias-label-primary,#1f2328); background:var(--dsw-alias-interactive-bg-hover,color-mix(in srgb,currentColor 5%,Canvas));
     }
+    [data-lf-pending] {
+      position:fixed; z-index:45; display:flex; align-items:flex-end; justify-content:center;
+      padding-bottom:18px; box-sizing:border-box; opacity:0; pointer-events:none;
+      background:color-mix(in srgb,var(--dsw-alias-bg-base,Canvas) 90%,transparent);
+      transition:opacity .16s ease;
+    }
+    [data-lf-pending][data-lf-visible] { opacity:1; pointer-events:auto; }
+    [data-lf-pending-badge] {
+      display:inline-flex; align-items:center; gap:8px; padding:6px 14px; border-radius:999px;
+      border:1px solid var(--dsw-alias-border-l2,color-mix(in srgb,currentColor 18%,transparent));
+      background:var(--dsw-alias-bg-layer-1,Canvas); color:var(--dsw-alias-label-secondary,#68707d);
+      font-size:12px; line-height:18px; box-shadow:0 2px 10px rgba(15,23,42,.12);
+    }
+    [data-lf-spinner] {
+      width:13px; height:13px; flex:none; border-radius:50%; border:2px solid currentColor;
+      border-top-color:transparent; animation:dsh-lf-spin .8s linear infinite;
+    }
+    @keyframes dsh-lf-spin { to { transform:rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) { [data-lf-spinner] { animation:none; } }
     [data-lf-toggle]:focus-visible, [data-lf-step-line] button:focus-visible, [data-lf-composer-handle]:focus-visible { outline:2px solid #5c8fff; outline-offset:2px; }
     [data-lf-control] { display:flex; justify-content:flex-start; width:100%; }
     [data-lf-control="user"] { justify-content:flex-end; }
@@ -179,6 +206,7 @@
     [data-conversation-scroll]:not(:has([data-conversation-composer-overlay])) > [data-lf-composer-docked] { top:var(--lf-composer-top); }
     [data-lf-setting] { display:flex; flex-direction:column; gap:4px; padding:18px; color:inherit; }
     [data-lf-setting-intro] { margin-bottom:16px; opacity:.65; font-size:13px; line-height:1.6; }
+    [data-lf-setting-footnote] { margin-top:14px; opacity:.55; font-size:12px; line-height:1.6; }
     [data-lf-setting-row] { display:flex; align-items:center; justify-content:space-between; gap:20px; padding:12px 0; border-bottom:1px solid color-mix(in srgb,currentColor 9%,transparent); }
     [data-lf-setting-text] { min-width:0; }
     [data-lf-setting-label] { font-size:14px; }
@@ -394,19 +422,42 @@
         if (low && /[\uD800-\uDBFF]/.test(node.textContent[low - 1])) low--
         node.textContent = node.textContent.slice(0, low)
       }
-      // Empty markdown blocks must not leave phantom paragraphs/list items. Ancestors
-      // of media are retained, including their captions and responsive picture nodes.
+      // Empty markdown blocks must not leave phantom paragraphs/list items, and a
+      // code block whose text fell outside the budget must not keep its chrome.
+      // The host draws a copy button with an icon-sized <svg> inside every block;
+      // treating that tick as "media" left an empty dark shell behind. Real media
+      // still keeps its ancestors: every image regardless of size, plus any <svg>
+      // large enough to be a diagram rather than a control icon.
+      const KEPT = 'img,picture,source,video,canvas,iframe,audio'
+      const iconSized = (element) => {
+        const rect = element.getBoundingClientRect()
+        return rect.width <= 32 && rect.height <= 32
+      }
+      const holdsContent = (element) =>
+        element.querySelector(KEPT) !== null ||
+        [...element.querySelectorAll('svg')].some((svg) => !iconSized(svg))
       const retainedText = texts
         .filter((entry) => entry.node.textContent.trim())
         .map((entry) => entry.node)
       for (const element of [...clone.querySelectorAll('*')].reverse()) {
-        if (element.matches(MEDIA) || element.querySelector(MEDIA)) continue
+        if (element.matches(MEDIA)) continue
+        if (holdsContent(element)) continue
         if (
           element.tagName === 'BR' &&
           retainedText.some((node) => element.compareDocumentPosition(node) & 4)
         )
           continue
         if (!element.textContent.trim()) element.remove()
+      }
+      // A table whose body fell outside the line budget must not leave a floating
+      // header row behind. The header cells still count as text lines, so the pass
+      // above keeps them while every data cell is already gone.
+      for (const table of [...clone.querySelectorAll('table')]) {
+        if (!table.querySelector('thead, th')) continue
+        if (holdsContent(table)) continue
+        const cells = [...table.querySelectorAll('td')]
+        if (cells.some((cell) => cell.textContent.trim())) continue
+        table.remove()
       }
       for (const key of [
         'position',
@@ -468,6 +519,31 @@
         queueIndex = 0,
         rebuilding = false
       let observedScrollRoot = null
+      // One style read per scan (instead of one per message) and a width guard:
+      // a container width change invalidates every cached measurement.
+      let fontKey = '',
+        lastRootWidth = 0
+      // Measurement counters, read through `stats()`. They change no behaviour.
+      const perf = {
+        scans: 0,
+        lastScanMs: 0,
+        scanMs: 0,
+        maxScanMs: 0,
+        renders: 0,
+        skipped: 0,
+        previews: 0,
+        folds: 0,
+        previewMs: 0,
+      }
+      let lineHeight = 0
+      // First-fold overlay state. `pendingShownAt === 0` means hidden.
+      let pendingNode = null,
+        pendingShownAt = 0,
+        pendingArmed = false,
+        pendingGaveUp = false,
+        pendingTimer = 0,
+        pendingFirstKey = '',
+        pendingCount = 0
       const now = () => view.performance.now()
       const notify = () => {
         for (const fn of [...listeners]) {
@@ -545,11 +621,19 @@
             record.source.after(record.preview)
           hide(record.source, 'data-lf-source')
         }
-        if (record.control)
-          record.source.parentNode.insertBefore(
-            record.control,
-            (open ? record.source : record.preview).nextSibling,
+        if (record.control) {
+          // Never re-insert the control when it already sits in the right place.
+          // Moving a node between a pointer's press and release cancels the click,
+          // and a live conversation re-scans (and used to re-insert) constantly.
+          const anchor = open ? record.source : (record.preview ?? record.source)
+          const parent = record.source.parentNode
+          if (
+            parent &&
+            anchor?.parentNode === parent &&
+            anchor.nextSibling !== record.control
           )
+            parent.insertBefore(record.control, anchor.nextSibling)
+        }
         put(record.button, 'aria-expanded', open)
         labelButton(
           record.button,
@@ -585,13 +669,34 @@
         const budget = settings.collapseAll
           ? settings.collapsedLines
           : settings[`${side}Lines`]
-        const currentWidth = record
-          ? row.getBoundingClientRect().width * record.ratio
-          : source.getBoundingClientRect().width
-        const width = Math.max(1, currentWidth)
-        const signature = `${source.innerHTML}\0${Math.round(width)}\0${budget}\0${view.getComputedStyle(source).font}`
-        if (!record || record.signature !== signature) {
+        perf.renders++
+        // A message that already fits inside the budget cannot need a preview: its
+        // whole height is at most `budget` lines. Cloning and measuring it first and
+        // then throwing the clone away was pure overhead on short messages.
+        if (!record && lineHeight > 0) {
+          const box = source.getBoundingClientRect()
+          if (box.height > 0 && box.height <= budget * lineHeight) {
+            perf.skipped++
+            return
+          }
+        }
+        // Cheap digest instead of serializing the whole subtree. Reading every
+        // message's innerHTML plus its computed font forced layout and style
+        // resolution once per message per scan, which dominated long transcripts.
+        const text = source.textContent ?? ''
+        const digest = `${text.length}\u0000${text.slice(0, 24)}\u0000${text.slice(-24)}\u0000${budget}\u0000${fontKey}`
+        if (!record || record.digest !== digest) {
+          const width = Math.max(
+            1,
+            record
+              ? row.getBoundingClientRect().width * record.ratio
+              : source.getBoundingClientRect().width,
+          )
+          const previewStart = now()
           const result = previewOf(doc, source, width, budget)
+          perf.previewMs += now() - previewStart
+          perf.previews += 1
+          if (result.preview) perf.folds += 1
           if (!result.preview) {
             if (record) release(record)
             return
@@ -613,6 +718,7 @@
                 Math.max(1, row.getBoundingClientRect().width),
               open: true,
               preview: null,
+              digest: '',
             }
             messages.set(row, record)
           }
@@ -620,7 +726,7 @@
           record.preview = result.preview
           record.count = result.count
           record.budget = budget
-          record.signature = signature
+          record.digest = digest
           record.preview.addEventListener('click', (event) => {
             const action = event.target.closest('button,img')
             const original = result.targets.get(action)
@@ -679,7 +785,25 @@
       const merged = (group) =>
         group.length > 1 &&
         !(turnSpread.get(group[0].turn) ?? !settings.mergeByDefault)
+      // The turn that is still generating. Folding it hides its reasoning and tool
+      // rows with `pointer-events:none`, so the reader cannot click the host's own
+      // disclosure headers to follow what is being thought. That turn stays open
+      // until it finishes; then the normal settings apply again. The mark is held
+      // briefly so a gap between stream chunks cannot make the steps flicker shut.
+      let liveHeld = '',
+        liveAt = -Infinity
+      const liveTurn = () => {
+        const node = scrollRoot()?.querySelector('[data-streaming]') ?? null
+        const turn =
+          node?.closest?.('[data-chat-turn]')?.getAttribute('data-chat-turn') ?? ''
+        if (turn) {
+          liveHeld = turn
+          liveAt = now()
+        }
+        return now() - liveAt < 1500 ? liveHeld : ''
+      }
       function renderSteps(allUnits) {
+        const live = liveTurn()
         const runs = []
         let run = null
         for (const unit of allUnits) {
@@ -731,7 +855,9 @@
             continue
           }
           const last = run.items.at(-1)
-          last.after(block.line)
+          // Same rule as the message control: re-inserting an unchanged row on every
+          // scan would swallow clicks that straddle a scan.
+          if (last.nextSibling !== block.line) last.after(block.line)
         }
         for (const [first, block] of blocks)
           if (!wanted.has(first)) {
@@ -748,6 +874,13 @@
         }
         for (const group of turns.values()) {
           if (!settings.enabled || !settings.workStepButtons) continue
+          if (live && group[0].turn === live) {
+            for (const block of group) {
+              block.line.hidden = true
+              for (const item of block.items) show(item)
+            }
+            continue
+          }
           const last = group.at(-1),
             isMerged = merged(group),
             singleBlock = group.length === 1
@@ -830,9 +963,73 @@
             timerNodes.delete(turn)
           }
       }
+      // ---- first-fold overlay -------------------------------------------------
+      // The transcript is covered while it is being folded for the first time (or
+      // after older history is prepended), so heights never shift under the reader.
+      const overlayNode = () => {
+        if (pendingNode) return pendingNode
+        pendingNode = ownNode(doc, 'div', 'data-lf-pending')
+        pendingNode.setAttribute('role', 'status')
+        pendingNode.setAttribute('aria-live', 'polite')
+        const badge = ownNode(doc, 'div', 'data-lf-pending-badge')
+        const spinner = ownNode(doc, 'span', 'data-lf-spinner')
+        spinner.setAttribute('aria-hidden', 'true')
+        const label = ownNode(doc, 'span', 'data-lf-pending-label')
+        label.textContent = '正在整理会话…'
+        badge.append(spinner, label)
+        pendingNode.appendChild(badge)
+        // The layer only covers the transcript: the composer stays usable.
+        pendingNode.addEventListener('wheel', (event) => event.preventDefault(), {
+          passive: false,
+        })
+        pendingNode.addEventListener('click', (event) => {
+          event.preventDefault()
+          event.stopPropagation()
+        })
+        return pendingNode
+      }
+      const placeOverlay = () => {
+        // Only a real conversation pane may be covered; settings pages and empty
+        // states have no session root and would otherwise get a full-page layer.
+        if (!doc.querySelector('[data-conversation-session]')) return false
+        const rect = scrollRoot()?.getBoundingClientRect?.()
+        if (!rect || rect.width < 80 || rect.height < 80) return false
+        const node = overlayNode()
+        node.style.left = `${Math.round(rect.left)}px`
+        node.style.top = `${Math.round(rect.top)}px`
+        node.style.width = `${Math.round(rect.width)}px`
+        node.style.height = `${Math.round(rect.height)}px`
+        if (!node.isConnected) doc.body.appendChild(node)
+        return true
+      }
+      const hideOverlay = () => {
+        view.clearTimeout(pendingTimer)
+        pendingTimer = 0
+        if (pendingShownAt === 0) {
+          pendingNode?.removeAttribute('data-lf-visible')
+          return
+        }
+        pendingShownAt = 0
+        pendingNode?.removeAttribute('data-lf-visible')
+      }
+      const showOverlay = () => {
+        if (disposed || !placeOverlay()) return
+        if (pendingShownAt === 0) {
+          pendingShownAt = now()
+          pendingTimer = view.setTimeout(() => {
+            pendingTimer = 0
+            // Failsafe: never trap the reader behind a badge that cannot finish.
+            pendingGaveUp = true
+            pendingArmed = false
+            hideOverlay()
+          }, PENDING_MAX_MS)
+        }
+        pendingNode.setAttribute('data-lf-visible', '')
+      }
       function scan() {
         frame = 0
         if (disposed) return
+        const scanStart = now()
         observer.disconnect()
         try {
           preserve(() => {
@@ -844,6 +1041,15 @@
             }
             if (settings.enabled) put(doc.documentElement, F.ROOT_ATTRIBUTE, 'on')
             else doc.documentElement.removeAttribute(F.ROOT_ATTRIBUTE)
+            // Font changes alter wrapping; sampled once per scan so the per-message
+            // digest never has to resolve styles itself.
+            fontKey =
+              view
+                .getComputedStyle(doc.documentElement)
+                .getPropertyValue('--dsh-content-font-size')
+                .trim() ||
+              view.getComputedStyle(doc.documentElement).fontSize ||
+              ''
             const nextSession =
               doc
                 .querySelector('[data-conversation-session]')
@@ -853,6 +1059,9 @@
               stepState.clear()
               turnSpread.clear()
               session = nextSession
+              // Entering a conversation: cover the transcript until it is folded.
+              pendingArmed = true
+              pendingGaveUp = false
             }
             if (rebuilding || !queue.length) {
               const list = units(),
@@ -860,6 +1069,23 @@
               queue = list.filter(messageKind)
               queueIndex = 0
               queueLatest = latest ? turnOf(latest) : ''
+              // "加载更早" prepends rows: the first message changes while the list
+              // grows. A resize or a new reply at the bottom must not arm the layer.
+              const firstKey =
+                list
+                  .find((unit) => messageKind(unit))
+                  ?.getAttribute('data-chat-anchor-key') ?? ''
+              if (
+                pendingFirstKey &&
+                firstKey &&
+                firstKey !== pendingFirstKey &&
+                list.length > pendingCount
+              ) {
+                pendingArmed = true
+                pendingGaveUp = false
+              }
+              pendingFirstKey = firstKey
+              pendingCount = list.length
               rebuilding = false
               const live = new Set(list)
               for (const [row, record] of messages)
@@ -868,15 +1094,59 @@
               renderTimers(list)
               composer.sync(settings.enabled, settings.composerResize)
             }
-            if (now() - lastInput > 180 || !settings.enabled) {
+            // One computed-style probe per scan feeds the "already fits" fast path.
+            if (queue.length) {
+              const probe = queue[Math.min(queueIndex, queue.length - 1)]
+              const probeBody = probe?.isConnected ? bodyOf(probe) : null
+              if (probeBody) {
+                const next = Number.parseFloat(
+                  view.getComputedStyle(probeBody).lineHeight,
+                )
+                if (Number.isFinite(next) && next > 0) lineHeight = next
+              }
+            }
+            const streamingBusy =
+              doc.querySelector(
+                '[data-conversation-scroll] [data-streaming]',
+              ) !== null
+            if (!settings.enabled) {
+              pendingArmed = false
+              hideOverlay()
+            }
+            const overlayBusy = pendingShownAt !== 0
+            if (overlayBusy || now() - lastInput > 180 || !settings.enabled) {
               const started = now()
+              // Behind the overlay the reader is not reading yet, so a bigger slice
+              // is safe and keeps the wait short.
+              const budget = overlayBusy ? PENDING_BUDGET_MS : SCAN_BUDGET_MS
               while (queueIndex < queue.length) {
                 const row = queue[queueIndex++]
                 if (row.isConnected) renderMessage(row, queueLatest)
-                if (now() - started > SCAN_BUDGET_MS) break
+                if (now() - started > budget) break
               }
               if (queueIndex < queue.length) schedule()
               else queue = []
+            }
+            const stillFolding =
+              pendingArmed &&
+              !pendingGaveUp &&
+              !streamingBusy &&
+              (queueIndex < queue.length || rebuilding)
+            if (stillFolding) showOverlay()
+            else {
+              // Nothing left to fold. Disarm, otherwise every later rebuild — a
+              // keystroke in the composer, a resize, a new reply — would look like
+              // "still folding" and bring the layer back.
+              pendingArmed = false
+              if (pendingShownAt !== 0) {
+                if (
+                  pendingGaveUp ||
+                  streamingBusy ||
+                  now() - pendingShownAt >= PENDING_MIN_MS
+                )
+                  hideOverlay()
+                else schedule()
+              }
             }
           })
         } finally {
@@ -886,6 +1156,11 @@
           dirty = false
           notify()
         }
+        const elapsed = now() - scanStart
+        perf.scans += 1
+        perf.lastScanMs = Math.round(elapsed * 100) / 100
+        perf.scanMs += elapsed
+        if (elapsed > perf.maxScanMs) perf.maxScanMs = Math.round(elapsed * 100) / 100
       }
       function schedule(changed = false) {
         if (disposed) return
@@ -900,6 +1175,14 @@
           if (record.target.nodeType === 1 && record.target.closest(OWN))
             return false
           if (record.target.parentElement?.closest(OWN)) return false
+          // Typing, draft chips and IME updates live inside the composer card and
+          // never change the transcript. Treating each keystroke as a conversation
+          // change made the plugin re-scan every message on every character.
+          const touched =
+            record.target.nodeType === 1
+              ? record.target
+              : record.target.parentElement
+          if (touched?.closest?.('[data-composer-card]')) return false
           if (
             record.type === 'childList' &&
             [...record.addedNodes, ...record.removedNodes].every(
@@ -939,11 +1222,23 @@
         })
       }
       const composer = createComposer(doc, view, notify, () => schedule(true))
-      const resize = new view.ResizeObserver(() => schedule(true))
+      const resize = new view.ResizeObserver((entries) => {
+        // Only a width change rewraps text; growth in height (streaming, new rows)
+        // must not throw away the measured previews.
+        const width =
+          entries?.[0]?.contentRect?.width ??
+          doc.querySelector('[data-conversation-scroll]')?.clientWidth ??
+          0
+        if (width > 0 && Math.abs(width - lastRootWidth) > 1) {
+          lastRootWidth = width
+          for (const record of messages.values()) record.digest = ''
+        }
+        schedule(true)
+      })
       resize.observe(doc.documentElement)
       const resized = (event) => {
         if (event?.target?.closest?.(OWN)) return
-        for (const record of messages.values()) record.signature = ''
+        for (const record of messages.values()) record.digest = ''
         schedule(true)
       }
       const wheel = () => {
@@ -1199,6 +1494,19 @@
         composer: () => composer.info(),
         setHeight: (value) => composer.setHeight(value),
         resetHeight: () => composer.reset(),
+        stats: () => ({
+          messages: messages.size,
+          blocks: blocks.size,
+          session,
+          lineHeight,
+          ...perf,
+          avgScanMs: perf.scans
+            ? Math.round((perf.scanMs / perf.scans) * 100) / 100
+            : 0,
+          avgPreviewMs: perf.previews
+            ? Math.round((perf.previewMs / perf.previews) * 100) / 100
+            : 0,
+        }),
         diagnostics: () => ({
           messages: messages.size,
           blocks: blocks.size,
@@ -1224,6 +1532,12 @@
           for (const node of [...hiddenNodes.keys()]) show(node)
           for (const block of blocks.values()) block.line.remove()
           for (const chip of timerNodes.values()) chip.remove()
+          view.clearTimeout(pendingTimer)
+          pendingTimer = 0
+          pendingNode?.remove()
+          pendingNode = null
+          pendingShownAt = 0
+          pendingArmed = false
           style.remove()
           doc.documentElement.removeAttribute(F.ROOT_ATTRIBUTE)
           view.CSS?.highlights?.delete('dsh-fold-match')
@@ -1282,6 +1596,26 @@
           if (!props.size) saved.delete(node)
         }
       }
+      // The host owns the composer's natural ceiling through this custom property
+      // (rc.5 sets 336px on the seat). Read it back instead of assuming a constant,
+      // so a later harness revision cannot make "restore natural height" land at
+      // the wrong size. Falls back to the historical constant when it is absent.
+      let naturalDefault = null
+      const naturalHeight = () => {
+        for (const record of cards.values()) {
+          try {
+            const value = view
+              .getComputedStyle(record.seat)
+              .getPropertyValue('--dsh-composer-text-max-height')
+              .trim()
+            const px = Number.parseFloat(value)
+            if (Number.isFinite(px) && px >= 32) return Math.round(px)
+          } catch {
+            /* keep scanning, then fall back */
+          }
+        }
+        return null
+      }
       const placement = ['position', 'top', 'bottom', 'left', 'width', 'box-sizing']
       const editorSize = ['height', 'min-height', 'max-height']
       const release = (card, record) => {
@@ -1305,7 +1639,7 @@
             .filter((record) => record.visible)
             .map((record) => record.limit ?? 1400),
         ),
-        default: COMPOSER_DEFAULT,
+        default: naturalDefault ?? COMPOSER_DEFAULT,
       })
       function apply() {
         // Swap only fixed placement and its equal-height reservation. Keep editor
@@ -1435,12 +1769,16 @@
         changed()
       }
       function reset() {
-        height = COMPOSER_DEFAULT
         manual = false
         try {
           view.localStorage.removeItem(COMPOSER_STORAGE_KEY)
         } catch {}
+        // Restore the host's own ceiling first, then measure it: while a manual
+        // preference is applied this property carries our value, not the host's.
         apply()
+        const natural = naturalHeight()
+        if (natural !== null) naturalDefault = natural
+        height = naturalDefault ?? COMPOSER_DEFAULT
         changed()
       }
       function sync(on, allowResize) {
@@ -1579,7 +1917,7 @@
       }
     }
 
-    return { SCAN_BUDGET_MS, COMPOSER_STORAGE_KEY, COMPOSER_DEFAULT, start }
+    return { SCAN_BUDGET_MS, PENDING_BUDGET_MS, PENDING_MIN_MS, PENDING_MAX_MS, COMPOSER_STORAGE_KEY, COMPOSER_DEFAULT, start }
   })()
 
   // ---- ./src/settings-panel.js
@@ -1853,6 +2191,11 @@
             'turnTimer',
             '每轮显示耗时',
             '从开始处理到最后一步输出完成，包含工具执行时间。',
+          ),
+          h(
+            'div',
+            { 'data-lf-setting-footnote': '1' },
+            '改动插件后需要退出并重新打开 DeepSeek Harness 才会生效；不要用刷新页面代替。',
           ),
         )
       }

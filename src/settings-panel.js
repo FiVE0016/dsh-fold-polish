@@ -268,6 +268,11 @@ export function createPanel(React, api) {
         '每轮显示耗时',
         '从开始处理到最后一步输出完成，包含工具执行时间。',
       ),
+      h(
+        'div',
+        { 'data-lf-setting-footnote': '1' },
+        '改动插件后需要退出并重新打开 DeepSeek Harness 才会生效；不要用刷新页面代替。',
+      ),
     )
   }
 
