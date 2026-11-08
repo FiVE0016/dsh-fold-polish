@@ -195,6 +195,17 @@ const bodyOf = (node) => {
       [...(root?.children ?? [])].find((child) => !child.matches(OWN)) ?? null
     )
   }
+  // Host 0.2.2-rc.1 renders the user text inside its own bubble component and
+  // puts a slot chain (`conversation.chat.user.before`) in front of the stack,
+  // so the fixed positional path below no longer lands on the text. Prefer the
+  // marker the host puts on the bubble itself and keep the old path as the
+  // fallback for hosts that predate it. `:not([data-lf-owned])` keeps our own
+  // collapsed preview, which is a clone inserted before the source, out of the
+  // way so the live node stays the one folded, searched and restored.
+  const bubble =
+    node.querySelector('[data-message-bubble]:not([data-lf-owned])') ??
+    node.querySelector('[data-text-interaction-source]:not([data-lf-owned])')
+  if (bubble) return bubble
   return (
     [...(node.firstElementChild?.firstElementChild?.children ?? [])].find(
       (child) =>
